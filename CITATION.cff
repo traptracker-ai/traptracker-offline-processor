@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: "Trap Tracker Offline Processor"
+message: "If you use this software in research or conservation work, please cite it."
+type: software
+authors:
+  - family-names: Fergus
+    given-names: Paul
+repository-code: "https://github.com/traptracker-ai/traptracker-offline-processor"
+url: "https://www.traptracker.co.uk"
+license: "custom-non-commercial"
+version: "0.1.0"

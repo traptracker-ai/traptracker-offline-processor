@@ -1,0 +1,61 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Model weights and engines
+*.onnx
+*.pt
+*.pth
+*.engine
+*.weights
+*.tflite
+*.h5
+models/*
+!models/.gitkeep
+!models/README.md
+
+# Data and outputs
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+runs/*
+!runs/.gitkeep
+logs/*
+!logs/.gitkeep
+data/
+uploads/
+results/
+datasets/
+exports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node/frontend
+node_modules/
+dist/
+build/
+.next/
+.vite/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar
+*.tar.gz

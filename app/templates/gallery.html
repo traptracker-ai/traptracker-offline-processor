@@ -1,0 +1,4 @@
+{% extends 'base.html' %}
+{% block title %}Annotated Gallery{% endblock %}
+{% block subtitle %}{{ job_id }}{% endblock %}
+{% block content %}<section class="gallery">{% for img in images %}<a class="thumb" href="/runs/{{ job_id }}/file/{{ img }}" target="_blank"><img src="/runs/{{ job_id }}/file/{{ img }}"><span>{{ img }}</span></a>{% else %}<div class="card">No annotated images found.</div>{% endfor %}</section>{% endblock %}

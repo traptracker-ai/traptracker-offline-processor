@@ -1,0 +1,4 @@
+{% extends 'base.html' %}
+{% block title %}Settings{% endblock %}
+{% block subtitle %}Paths, models and runtime information{% endblock %}
+{% block content %}<section class="card"><h2>Runtime</h2><p><b>Providers:</b> {{ providers|join(', ') }}</p><p><b>GPU ready:</b> {{ gpu_ready }}</p><p><b>Model directory:</b> <code>{{ model_dir }}</code></p><p><b>Input directory:</b> <code>{{ input_dir }}</code></p><p><b>Runs directory:</b> <code>{{ runs_dir }}</code></p><p><b>Classes file:</b> <code>{{ classes_path }}</code></p></section>{% endblock %}

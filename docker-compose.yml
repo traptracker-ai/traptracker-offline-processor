@@ -1,0 +1,37 @@
+services:
+  traptracker-flask:
+    build: .
+    container_name: traptracker-flask-onnx-gpu
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./models:/app/models
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./runs:/app/runs
+      - ./logs:/app/logs
+    environment:
+      - MODEL_DIR=/app/models
+      - INPUT_DIR=/app/input
+      - OUTPUT_DIR=/app/output
+      - RUNS_DIR=/app/runs
+      - LOG_DIR=/app/logs
+      - ORT_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
+      - MAX_CONTENT_LENGTH_MB=4096
+      # Set a stable secret so flash messages survive restarts (optional).
+      # - SECRET_KEY=change-me-to-a-long-random-value
+    # Larger shared memory avoids crashes during video decode / ORT execution.
+    shm_size: "2gb"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,11 @@
+Flask==3.0.3
+# CUDA 12.x / cuDNN 9 build (default on PyPI since 1.19). Must match the
+# CUDA 12.4 + cuDNN 9 base image in the Dockerfile, or ORT silently runs on CPU.
+onnxruntime-gpu==1.20.1
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+pandas==2.2.2
+Pillow==10.4.0
+ExifRead==3.0.0
+psutil==6.0.0
+waitress==3.0.0

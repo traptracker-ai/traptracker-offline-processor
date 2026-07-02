@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.cache
+.wget-hsts
+input/*
+output/*
+runs/*
+logs/*
+models/*.onnx
+*.zip

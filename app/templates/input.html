@@ -1,0 +1,7 @@
+{% extends 'base.html' %}
+{% block title %}Input Manager{% endblock %}
+{% block subtitle %}Upload smaller batches or copy large datasets directly into ./input{% endblock %}
+{% block content %}
+<section class="grid two"><div class="card"><h2>Upload Files</h2><form method="post" enctype="multipart/form-data"><input class="filebox" type="file" name="files" multiple><button class="btn primary" type="submit">Upload to input folder</button></form><p class="muted">For thousands of files or large MP4s, copy them directly into the project <code>input/</code> folder instead of browser upload.</p></div><div class="card"><h2>Current Input Folder</h2><p><b>{{ scan.count }}</b> files — {{ human_bytes(scan.total) }}</p><p>{{ scan.images }} images, {{ scan.videos }} videos</p><form method="post" action="/clear-input" onsubmit="return confirm('Clear input folder?')"><button class="btn danger">Clear input folder</button></form></div></section>
+<section class="card"><h2>Detected Files</h2><table><thead><tr><th>Name</th><th>Type</th><th>Size</th></tr></thead><tbody>{% for f in scan.files[:500] %}<tr><td>{{ f.name }}</td><td>{{ f.ext }}</td><td>{{ human_bytes(f.size) }}</td></tr>{% else %}<tr><td colspan="3" class="empty">No files found in input folder.</td></tr>{% endfor %}</tbody></table>{% if scan.files|length > 500 %}<p class="muted">Showing first 500 files.</p>{% endif %}</section>
+{% endblock %}

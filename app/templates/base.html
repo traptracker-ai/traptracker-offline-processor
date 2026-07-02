@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TrapTracker DT — Open Source</title>
+  <link rel="icon" href="{{ url_for('static', filename='img/logo.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><img src="{{ url_for('static', filename='img/logo-wide.png') }}" alt="TrapTracker"><p>AI-Driven Wildlife<br>Monitoring for Conservation</p></div>
+    <nav>
+      <a href="/" class="{{ 'active' if request.path == '/' else '' }}">Dashboard</a>
+      <a href="/input" class="{{ 'active' if request.path.startswith('/input') else '' }}">Input Manager</a>
+      <a href="/processing" class="{{ 'active' if request.path.startswith('/processing') else '' }}">Processing</a>
+      <a href="/runs" class="{{ 'active' if request.path.startswith('/runs') else '' }}">Runs & Results</a>
+      <a href="/settings" class="{{ 'active' if request.path.startswith('/settings') else '' }}">Settings</a>
+    </nav>
+    <div class="status-box"><span class="dot"></span><b>System Status</b><br><small>ONNX Runtime: <b>{{ 'GPU' if gpu_ready else 'CPU' }}</b></small><br><small>{{ providers|join(', ') }}</small></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div><h1>{% block title %}TrapTracker DT{% endblock %}</h1><p>{% block subtitle %}Open-source ONNX GPU workflow for camera-trap images and video{% endblock %}</p></div><a class="btn primary" href="/processing">New Run</a></header>
+    {% with messages = get_flashed_messages() %}{% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}{% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

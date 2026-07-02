@@ -1,0 +1,4 @@
+{% extends 'base.html' %}
+{% block title %}Runs & Results{% endblock %}
+{% block subtitle %}Review job history, download CSVs and export result packages{% endblock %}
+{% block content %}<section class="card"><h2>All Runs</h2><table><thead><tr><th>Run</th><th>Status</th><th>Progress</th><th>Files</th><th>Detections</th><th>Failed</th><th>Started</th><th></th></tr></thead><tbody>{% for j in all_jobs %}<tr><td>{{ j.id }}</td><td><span class="pill {{ j.status }}">{{ j.status }}</span></td><td>{{ j.progress|default(0) }}%</td><td>{{ j.processed|default(0) }}/{{ j.total|default(0) }}</td><td>{{ j.detections|default(0) }}</td><td>{{ j.failed|default(0) }}</td><td>{{ j.started }}</td><td><a href="/runs/{{ j.id }}">Open</a></td></tr>{% else %}<tr><td colspan="8" class="empty">No runs yet.</td></tr>{% endfor %}</tbody></table></section>{% endblock %}

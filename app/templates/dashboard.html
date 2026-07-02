@@ -1,0 +1,17 @@
+{% extends 'base.html' %}
+{% block title %}TrapTracker DT — Open Source{% endblock %}
+{% block subtitle %}Production-ready YOLO26 ONNX GPU processing for camera-trap images and video{% endblock %}
+{% block content %}
+<section class="metric-grid">
+  <div class="metric"><label>Input files</label><strong>{{ scan.count }}</strong><span>{{ human_bytes(scan.total) }} total</span></div>
+  <div class="metric"><label>Images</label><strong>{{ scan.images }}</strong><span>JPG, PNG, TIFF, WEBP</span></div>
+  <div class="metric"><label>Videos</label><strong>{{ scan.videos }}</strong><span>MP4, MOV, AVI, MKV</span></div>
+  <div class="metric"><label>Models found</label><strong>{{ models|length }}</strong><span>ONNX files in ./models</span></div>
+  <div class="metric"><label>GPU provider</label><strong>{{ 'Ready' if gpu_ready else 'Unavailable' }}</strong><span>{{ 'CUDAExecutionProvider available' if gpu_ready else 'CPU fallback only' }}</span></div>
+</section>
+<section class="grid two">
+  <div class="card"><h2>Workflow Overview</h2><div class="workflow"><div>Input<br><small>Images / videos</small></div><b>→</b><div>Preprocess<br><small>Frames / EXIF</small></div><b>→</b><div>AI Detection<br><small>YOLO26 ONNX</small></div><b>→</b><div>Results<br><small>CSV / gallery</small></div><b>→</b><div>Export<br><small>ZIP package</small></div></div><p>TrapTracker DT automates detection, classification and logging of wildlife from camera-trap images and videos using plain ONNX weights with GPU acceleration.</p></div>
+  <div class="card"><h2>Quick Start</h2><div class="quick"><a href="/input">1. Add input files</a><a href="/processing">2. Select ONNX model</a><a href="/processing">3. Configure thresholds</a><a href="/processing">4. Start processing</a><a href="/runs">5. Review and export results</a></div></div>
+</section>
+<section class="card"><div class="section-head"><h2>Recent Runs</h2><a href="/runs" class="btn">View all</a></div><table><thead><tr><th>Run</th><th>Status</th><th>Files</th><th>Detections</th><th>Failed</th><th></th></tr></thead><tbody>{% for j in jobs %}<tr><td>{{ j.id }}</td><td><span class="pill {{ j.status }}">{{ j.status }}</span></td><td>{{ j.processed|default(0) }}/{{ j.total|default(0) }}</td><td>{{ j.detections|default(0) }}</td><td>{{ j.failed|default(0) }}</td><td><a href="/runs/{{ j.id }}">Open</a></td></tr>{% else %}<tr><td colspan="6" class="empty">No runs yet.</td></tr>{% endfor %}</tbody></table></section>
+{% endblock %}
