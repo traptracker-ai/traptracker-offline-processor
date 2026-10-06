@@ -35,23 +35,25 @@ Commercial use requires prior written permission. See [`COMMERCIAL_USE.md`](COMM
 
 Model weights are not stored in this repository.
 
-Place compatible ONNX models and class files in the local `models/` folder when running the application:
+Place compatible ONNX models in the local `models/` folder when running the application. The Processing page lets you choose between two pipelines:
+
+- **Single-stage detector** - one model (e.g. YOLOv10, YOLO26) finds and labels animals in a single pass.
+- **Two-stage detector** - a detector finds animals, then a species classifier (e.g. DeepFaune) labels each crop.
 
 ```text
 models/
-  model.onnx
-  classes.txt
+  single-stage-detectors/
+    uk-mammals.onnx
+    uk-mammals.txt                    # optional; same name as the model
+  two-stage-detectors/
+    <name>_stage1_detector.onnx
+    <name>_stage2_classifier.onnx
+    <name>_stage2_classifier.txt      # optional
 ```
 
-You can keep several models and class files side by side. A class file with the same stem as the model will be selected automatically, for example:
+Single-stage models use a class file with the same name as the model by default; any `.txt` or `.names` file next to the models can also be selected. If no class file is found, the class names embedded in the ONNX model are used. ONNX files placed directly in `models/` are still treated as single-stage models.
 
-```text
-models/
-  uk-mammals.onnx
-  uk-mammals.txt
-```
-
-Any `.txt` or `.names` file in `models/` can also be selected from the Processing page.
+Two-stage models are paired by name. The classifier's input size, normalisation and class names are read from its ONNX metadata when present (the `.txt` file is only a fallback). If the stage 1 detector has an `animal` class, only animal boxes are classified and people/vehicles keep the detector label; otherwise every box is reclassified. In the results CSV, `species` and `confidence` come from the classifier and `detector_class` / `detector_confidence` record the stage 1 result.
 
 Official Trap Tracker AI model releases will be published separately through Zenodo so they can be cited using DOIs.
 
@@ -70,7 +72,7 @@ Create the local runtime folders if they do not already exist:
 mkdir models input output runs logs
 ```
 
-Place your ONNX model and class-name file in `models/`.
+Place your ONNX models in `models/single-stage-detectors/` and/or `models/two-stage-detectors/` (see [Model weights](#model-weights)).
 
 Run the application:
 

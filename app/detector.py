@@ -1,4 +1,6 @@
 from pathlib import Path
+import ast
+import json
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -6,10 +8,15 @@ import onnxruntime as ort
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}
 VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.m4v'}
 
+GPU_PROVIDERS = ('CUDAExecutionProvider', 'TensorrtExecutionProvider')
+DEFAULT_INPUT_SIZE = 640
+
 
 def load_classes(path: str):
+    if not path:
+        return []
     p = Path(path)
-    if not p.exists():
+    if not p.is_file():
         return []
     return [x.strip() for x in p.read_text(encoding='utf-8').splitlines() if x.strip()]
 
@@ -19,6 +26,64 @@ def available_providers():
         return ort.get_available_providers()
     except Exception:
         return ['CPUExecutionProvider']
+
+
+def _create_session(model_path, providers=None):
+    """Create an ORT session, recording (rather than hiding) any fall back to CPU.
+
+    Returns (session, active_providers, on_gpu, warnings).
+    """
+    model_path = str(model_path)
+    if not Path(model_path).exists():
+        raise FileNotFoundError(f'ONNX model not found: {model_path}')
+    providers = providers or ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    avail = available_providers()
+    requested_gpu = any(p in GPU_PROVIDERS for p in providers)
+    usable = [p for p in providers if p in avail]
+    if not usable:
+        usable = ['CPUExecutionProvider']
+
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    warnings = []
+    try:
+        session = ort.InferenceSession(model_path, sess_options=so, providers=usable)
+    except Exception as e:
+        # Record why GPU init failed instead of silently dropping to CPU.
+        warnings.append(f'Failed to init providers {usable} for {Path(model_path).name}: {e}')
+        session = ort.InferenceSession(model_path, sess_options=so, providers=['CPUExecutionProvider'])
+
+    active = session.get_providers()
+    # Detect the genuinely active EP. ORT lists CPU as a fallback even on a
+    # working GPU session, so "on GPU" means a GPU EP is actually present.
+    on_gpu = any(p in GPU_PROVIDERS for p in active)
+    if requested_gpu and not on_gpu:
+        warnings.append(
+            'GPU was requested but ONNX Runtime is running on CPU. '
+            'This usually means the onnxruntime-gpu build does not match the '
+            'container CUDA/cuDNN version, or the NVIDIA runtime is not available to Docker.'
+        )
+    return session, active, on_gpu, warnings
+
+
+def _metadata(session):
+    try:
+        return dict(session.get_modelmeta().custom_metadata_map or {})
+    except Exception:
+        return {}
+
+
+def _parse_literal(value):
+    """Parse a metadata value written as JSON or as a Python literal (Ultralytics)."""
+    if not value:
+        return None
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            return parse(value)
+        except Exception:
+            continue
+    return None
 
 
 def _nms(boxes, scores, iou_thresh=0.45):
@@ -49,52 +114,65 @@ def _nms(boxes, scores, iou_thresh=0.45):
     return keep
 
 
-class YOLO26ONNX:
-    def __init__(self, model_path: str, classes_path: str, providers=None, input_size=640, conf=0.25, iou=0.45):
+def annotate(image_bgr, detections):
+    out = image_bgr.copy()
+    for d in detections:
+        x1, y1, x2, y2 = map(int, [d['x1'], d['y1'], d['x2'], d['y2']])
+        label = f"{d['species']} {d['confidence']:.2f}"
+        cv2.rectangle(out, (x1, y1), (x2, y2), (20, 110, 60), 2)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        cv2.rectangle(out, (x1, max(0, y1-th-8)), (x1+tw+8, y1), (20, 110, 60), -1)
+        cv2.putText(out, label, (x1+4, max(12, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+    return out
+
+
+class YOLOONNX:
+    """Single-stage YOLO detector (YOLOv8/v10/11/26 ONNX exports).
+
+    Also used as stage 1 of the two-stage pipeline.
+    """
+
+    def __init__(self, model_path: str, classes_path: str = '', providers=None, input_size=None, conf=0.25, iou=0.45):
         self.model_path = str(model_path)
-        if not Path(self.model_path).exists():
-            raise FileNotFoundError(f'ONNX model not found: {self.model_path}')
-        self.classes = load_classes(classes_path)
-        self.input_size = int(input_size)
         self.conf = float(conf)
         self.iou = float(iou)
-        providers = providers or ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        avail = available_providers()
-        requested_gpu = any(p in ('CUDAExecutionProvider', 'TensorrtExecutionProvider') for p in providers)
-        usable = [p for p in providers if p in avail]
-        if not usable:
-            usable = ['CPUExecutionProvider']
+        self.session, self.providers, self.on_gpu, self.warnings = _create_session(self.model_path, providers)
+        meta = _metadata(self.session)
 
-        so = ort.SessionOptions()
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # Class names: explicit file first, then the names embedded by Ultralytics.
+        self.classes = load_classes(classes_path)
+        if not self.classes:
+            names = _parse_literal(meta.get('names'))
+            if isinstance(names, dict):
+                self.classes = [str(names[k]) for k in sorted(names, key=int)]
+            elif isinstance(names, list):
+                self.classes = [str(n) for n in names]
 
-        self.warnings = []
-        self.session = None
-        try:
-            self.session = ort.InferenceSession(self.model_path, sess_options=so, providers=usable)
-        except Exception as e:
-            # Record why GPU init failed instead of silently dropping to CPU.
-            self.warnings.append(f'Failed to init providers {usable}: {e}')
-            self.session = ort.InferenceSession(self.model_path, sess_options=so, providers=['CPUExecutionProvider'])
-
-        self.providers = self.session.get_providers()
-        # Detect the genuinely active EP. ORT lists CPU as a fallback even on a
-        # working GPU session, so "on GPU" means a GPU EP is actually present.
-        self.on_gpu = any(p in ('CUDAExecutionProvider', 'TensorrtExecutionProvider') for p in self.providers)
-        if requested_gpu and not self.on_gpu:
-            self.warnings.append(
-                'GPU was requested but ONNX Runtime is running on CPU. '
-                'This usually means the onnxruntime-gpu build does not match the '
-                'container CUDA/cuDNN version, or the NVIDIA runtime is not available to Docker.'
-            )
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
-        # Infer the model's expected spatial size from a static input shape when present.
+        # Input size: a static input shape wins; otherwise the user's value; otherwise
+        # the training size recorded in the model metadata; otherwise 640.
+        size = int(input_size or 0)
+        if size <= 0:
+            imgsz = _parse_literal(meta.get('imgsz'))
+            if isinstance(imgsz, (list, tuple)) and imgsz:
+                size = int(max(imgsz))
+            elif isinstance(imgsz, int):
+                size = imgsz
+        if size <= 0:
+            size = DEFAULT_INPUT_SIZE
+        size = int(np.ceil(size / 32) * 32)
         shape = inp.shape
         if isinstance(shape, (list, tuple)) and len(shape) == 4:
             h, w = shape[2], shape[3]
             if isinstance(h, int) and isinstance(w, int) and h > 0 and w > 0:
-                self.input_size = int(h)
+                size = int(h)
+        self.input_size = size
+        # True only if the model's batch axis is dynamic (a symbolic name, not
+        # a fixed int) -- a model exported with a fixed batch=1 input shape
+        # will raise a shape-mismatch error if actually sent a batch, so
+        # detect_batch() below falls back to one-at-a-time calls for those.
+        self.batch_dynamic = isinstance(shape, (list, tuple)) and len(shape) == 4 and not isinstance(shape[0], int)
 
     def preprocess(self, image_bgr):
         h, w = image_bgr.shape[:2]
@@ -166,11 +244,7 @@ class YOLO26ONNX:
         return [(float(xyxy[i, 0]), float(xyxy[i, 1]), float(xyxy[i, 2]), float(xyxy[i, 3]),
                  float(scores[i]), int(cls_ids[i])) for i in keep]
 
-    def detect_image_array(self, image_bgr, filename='image'):
-        tensor, scale, dw, dh, orig_w, orig_h = self.preprocess(image_bgr)
-        outputs = self.session.run(None, {self.input_name: tensor})
-        raw = self._parse_outputs(outputs)
-        decoded = self._decode(raw)
+    def _rows_from_decoded(self, decoded, scale, dw, dh, orig_w, orig_h, filename):
         rows = []
         for x1, y1, x2, y2, score, cls_i in decoded:
             x1 = (x1 - dw) / scale
@@ -192,13 +266,225 @@ class YOLO26ONNX:
             })
         return rows
 
+    def detect_image_array(self, image_bgr, filename='image'):
+        tensor, scale, dw, dh, orig_w, orig_h = self.preprocess(image_bgr)
+        outputs = self.session.run(None, {self.input_name: tensor})
+        raw = self._parse_outputs(outputs)
+        decoded = self._decode(raw)
+        return self._rows_from_decoded(decoded, scale, dw, dh, orig_w, orig_h, filename)
+
+    def detect_batch(self, images_bgr, filenames=None):
+        """Detect on a list of images with ONE inference call per batch
+        instead of one call per image -- at batch=1, most of the wall-clock
+        cost of a GPU inference call is fixed kernel-launch/data-transfer
+        overhead rather than compute, so processing images one at a time
+        leaves the GPU mostly idle between calls; batching amortises that
+        fixed cost across many images per call.
+
+        Falls back to one-at-a-time calls transparently if this model's ONNX
+        graph has a fixed (non-dynamic) batch axis and genuinely cannot
+        accept more than one image per call.
+        """
+        if not images_bgr:
+            return []
+        filenames = filenames or [f'image_{i}' for i in range(len(images_bgr))]
+        if not self.batch_dynamic:
+            return [self.detect_image_array(img, fn) for img, fn in zip(images_bgr, filenames)]
+
+        tensors, metas = [], []
+        for img in images_bgr:
+            t, scale, dw, dh, w, h = self.preprocess(img)
+            tensors.append(t[0])
+            metas.append((scale, dw, dh, w, h))
+        batch = np.ascontiguousarray(np.stack(tensors).astype(np.float32))
+        try:
+            outputs = self.session.run(None, {self.input_name: batch})
+        except Exception:
+            # Some exports declare a dynamic batch axis but only actually
+            # tolerate batch=1 (e.g. a fixed-shape NMS op baked in elsewhere
+            # in the graph). Don't fail the whole batch -- fall back.
+            return [self.detect_image_array(img, fn) for img, fn in zip(images_bgr, filenames)]
+
+        raw_batch = np.asarray(outputs[0], dtype=np.float32)
+        if raw_batch.ndim != 3 or raw_batch.shape[0] != len(images_bgr):
+            # Unexpected output shape for a batched call -- fall back rather
+            # than risk silently mis-attributing detections to the wrong image.
+            return [self.detect_image_array(img, fn) for img, fn in zip(images_bgr, filenames)]
+
+        results = []
+        for i, (scale, dw, dh, orig_w, orig_h) in enumerate(metas):
+            decoded = self._decode(raw_batch[i])
+            results.append(self._rows_from_decoded(decoded, scale, dw, dh, orig_w, orig_h, filenames[i]))
+        return results
+
     def annotate(self, image_bgr, detections):
-        out = image_bgr.copy()
-        for d in detections:
-            x1, y1, x2, y2 = map(int, [d['x1'], d['y1'], d['x2'], d['y2']])
-            label = f"{d['species']} {d['confidence']:.2f}"
-            cv2.rectangle(out, (x1, y1), (x2, y2), (20, 110, 60), 2)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-            cv2.rectangle(out, (x1, max(0, y1-th-8)), (x1+tw+8, y1), (20, 110, 60), -1)
-            cv2.putText(out, label, (x1+4, max(12, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-        return out
+        return annotate(image_bgr, detections)
+
+
+# Backwards-compatible name used by earlier versions of the app.
+YOLO26ONNX = YOLOONNX
+
+
+class CropClassifierONNX:
+    """Stage 2 species classifier (DeepFaune-style) that labels detector crops.
+
+    Input size, normalisation and class names are read from the ONNX metadata
+    when present, so a mismatched .txt file cannot silently shift the labels.
+    """
+
+    def __init__(self, model_path: str, classes_path: str = '', providers=None, batch_size=16):
+        self.model_path = str(model_path)
+        self.batch_size = max(1, int(batch_size))
+        self.session, self.providers, self.on_gpu, self.warnings = _create_session(self.model_path, providers)
+        meta = _metadata(self.session)
+        inp = self.session.get_inputs()[0]
+        self.input_name = inp.name
+        out = self.session.get_outputs()[0]
+        n_out = out.shape[-1] if isinstance(out.shape[-1], int) else None
+
+        size = 0
+        if isinstance(inp.shape, (list, tuple)) and len(inp.shape) == 4 and isinstance(inp.shape[2], int):
+            size = inp.shape[2]
+        if size <= 0:
+            try:
+                size = int(meta.get('input_size', 0))
+            except ValueError:
+                size = 0
+        self.input_size = size if size > 0 else 182
+
+        mean = _parse_literal(meta.get('mean')) or [0.485, 0.456, 0.406]
+        std = _parse_literal(meta.get('std')) or [0.229, 0.224, 0.225]
+        self.mean = np.asarray(mean, dtype=np.float32).reshape(1, 1, 3)
+        self.std = np.asarray(std, dtype=np.float32).reshape(1, 1, 3)
+
+        meta_classes = _parse_literal(meta.get('classes'))
+        file_classes = load_classes(classes_path)
+        if isinstance(meta_classes, list) and meta_classes:
+            self.classes = [str(c) for c in meta_classes]
+            if file_classes and file_classes != self.classes:
+                self.warnings.append(
+                    f'Class file {Path(classes_path).name} does not match the class list embedded in '
+                    f'{Path(self.model_path).name}; using the embedded list.'
+                )
+        else:
+            self.classes = file_classes
+        if n_out and self.classes and len(self.classes) != n_out:
+            self.warnings.append(
+                f'Classifier outputs {n_out} classes but {len(self.classes)} class names were found; '
+                'labels may be wrong.'
+            )
+
+    def _crop(self, image_bgr, box):
+        """Square crop around the box (DeepFaune convention), clipped to the image."""
+        h, w = image_bgr.shape[:2]
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        bw, bh = x2 - x1, y2 - y1
+        if bw > bh:
+            pad = (bw - bh) // 2
+            y1, y2 = y1 - pad, y2 + pad
+        elif bh > bw:
+            pad = (bh - bw) // 2
+            x1, x2 = x1 - pad, x2 + pad
+        crop = image_bgr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+        return crop if crop.size else None
+
+    def _preprocess(self, crop_bgr):
+        size = self.input_size
+        resized = cv2.resize(crop_bgr, (size, size), interpolation=cv2.INTER_CUBIC)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        rgb = (rgb - self.mean) / self.std
+        return np.transpose(rgb, (2, 0, 1))
+
+    def classify(self, image_bgr, boxes):
+        """Return one (class_id, label, prob) per box, or None where no crop was possible."""
+        results = [None] * len(boxes)
+        tensors, idx = [], []
+        for i, box in enumerate(boxes):
+            crop = self._crop(image_bgr, box)
+            if crop is None:
+                continue
+            tensors.append(self._preprocess(crop))
+            idx.append(i)
+        for start in range(0, len(tensors), self.batch_size):
+            batch = np.ascontiguousarray(np.stack(tensors[start:start + self.batch_size]).astype(np.float32))
+            logits = np.asarray(self.session.run(None, {self.input_name: batch})[0], dtype=np.float32)
+            logits = logits - logits.max(axis=1, keepdims=True)
+            probs = np.exp(logits)
+            probs /= probs.sum(axis=1, keepdims=True)
+            for row, i in zip(probs, idx[start:start + self.batch_size]):
+                c = int(np.argmax(row))
+                label = self.classes[c] if 0 <= c < len(self.classes) else str(c)
+                results[i] = (c, label, float(row[c]))
+        return results
+
+
+class TwoStageDetector:
+    """Stage 1 finds boxes, stage 2 classifies each crop to species.
+
+    If the stage 1 detector has an 'animal' class (MegaDetector-style), only
+    animal boxes are sent to the classifier; person/vehicle/etc. keep their
+    detector label. If it has no 'animal' class (e.g. a species detector), every
+    box is reclassified.
+    """
+
+    def __init__(self, detector_path, classifier_path, classifier_classes_path='', providers=None,
+                 input_size=None, conf=0.25, iou=0.45):
+        self.detector = YOLOONNX(detector_path, '', providers=providers,
+                                 input_size=input_size, conf=conf, iou=iou)
+        self.classifier = CropClassifierONNX(classifier_path, classifier_classes_path, providers=providers)
+        det_classes = [c.lower() for c in self.detector.classes]
+        self.classify_ids = {i for i, c in enumerate(det_classes) if c == 'animal'} or None
+        self.input_size = self.detector.input_size
+        self.providers = self.detector.providers
+        self.on_gpu = self.detector.on_gpu and self.classifier.on_gpu
+        self.warnings = self.detector.warnings + self.classifier.warnings
+
+    def _classify_rows(self, image_bgr, rows):
+        for d in rows:
+            d['detector_class'] = d['species']
+            d['detector_confidence'] = d['confidence']
+        targets = [d for d in rows if self.classify_ids is None or d['class_id'] in self.classify_ids]
+        if targets:
+            boxes = [(d['x1'], d['y1'], d['x2'], d['y2']) for d in targets]
+            for d, res in zip(targets, self.classifier.classify(image_bgr, boxes)):
+                if res is None:
+                    continue
+                c, label, prob = res
+                d['class_id'] = c
+                d['species'] = label
+                d['confidence'] = round(prob, 6)
+        return rows
+
+    def detect_image_array(self, image_bgr, filename='image'):
+        rows = self.detector.detect_image_array(image_bgr, filename=filename)
+        return self._classify_rows(image_bgr, rows)
+
+    def detect_batch(self, images_bgr, filenames=None):
+        """Batch stage 1 (localisation) across images in one inference call;
+        stage 2 (classification) still runs per image, batched across that
+        image's own boxes as before -- already the cheaper stage per call,
+        and per-image detection counts are too small/uneven to usefully
+        combine into one cross-image classifier batch."""
+        if not images_bgr:
+            return []
+        filenames = filenames or [f'image_{i}' for i in range(len(images_bgr))]
+        per_image_rows = self.detector.detect_batch(images_bgr, filenames=filenames)
+        return [self._classify_rows(img, rows) for img, rows in zip(images_bgr, per_image_rows)]
+
+    def annotate(self, image_bgr, detections):
+        return annotate(image_bgr, detections)
+
+
+def build_detector(config, providers=None):
+    """Create the single-stage or two-stage pipeline described by a run config."""
+    if config.get('pipeline') == 'two_stage':
+        return TwoStageDetector(
+            config['model_path'], config['classifier_path'], config.get('classifier_classes_path', ''),
+            providers=providers, input_size=config.get('input_size'),
+            conf=config.get('conf', 0.25), iou=config.get('iou', 0.45),
+        )
+    return YOLOONNX(
+        config['model_path'], config.get('classes_path', ''), providers=providers,
+        input_size=config.get('input_size'), conf=config.get('conf', 0.25),
+        iou=config.get('iou', 0.45),
+    )

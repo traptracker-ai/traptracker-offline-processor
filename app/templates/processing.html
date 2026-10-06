@@ -1,6 +1,25 @@
 {% extends 'base.html' %}
 {% block title %}Processing{% endblock %}
-{% block subtitle %}Configure YOLO26 ONNX inference and start a background GPU job{% endblock %}
+{% block subtitle %}Configure single-stage or two-stage ONNX inference and start a background GPU job{% endblock %}
 {% block content %}
-<section class="card narrow"><h2>New Detection Run</h2><form method="post" class="form"><label>ONNX model<select name="model" required>{% for m in models %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select></label><label>Class names file<select name="classes">{% if not class_files %}<option value="">classes.txt (default)</option>{% endif %}{% for c in class_files %}<option value="{{ c }}"{% if c == 'classes.txt' %} selected{% endif %}>{{ c }}</option>{% endfor %}</select><small>Leave on a same-named file to match it to the model automatically.</small></label><label>Confidence threshold<input type="number" name="conf" min="0" max="1" step="0.01" value="0.25"></label><label>IoU (NMS) threshold<input type="number" name="iou" min="0" max="1" step="0.01" value="0.45"><small>Only used for raw (non end-to-end) ONNX exports.</small></label><label>Input size<input type="number" name="input_size" value="640" step="32"></label><label>Video frame stride<input type="number" name="frame_stride" value="1" min="1"><small>1 = every frame, 30 = roughly every second for 30fps video.</small></label><label class="check"><input type="checkbox" name="save_annotated" checked> Save annotated images</label><div class="summary-box">Input ready: <b>{{ scan.count }}</b> files, {{ human_bytes(scan.total) }}. GPU: <b>{{ 'Ready' if gpu_ready else 'Not available' }}</b></div><button class="btn primary big" type="submit">Start detection run</button></form></section>
+<section class="card narrow"><h2>New Detection Run</h2><form method="post" class="form">
+<fieldset class="choice"><legend>Detection pipeline</legend>
+<label class="check"><input type="radio" name="pipeline" value="single_stage" checked> <span>Single-stage detector<small>One model finds and labels animals in a single pass (e.g. YOLOv10, YOLO26).</small></span></label>
+<label class="check"><input type="radio" name="pipeline" value="two_stage"{% if not two_stage %} disabled{% endif %}> <span>Two-stage detector<small>A detector finds animals, then a species classifier labels each crop (e.g. DeepFaune).{% if not two_stage %} No two-stage models found in <code>models/two-stage-detectors</code>.{% endif %}</small></span></label>
+</fieldset>
+<div data-pipeline="single_stage">
+<label>ONNX model<select name="model" required>{% for m in models %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>{% if not models %}<small>No single-stage models found in <code>models/single-stage-detectors</code>.</small>{% endif %}</label>
+<label>Class names file<select name="classes"><option value="" selected>Auto (match model name)</option>{% for c in class_files %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select><small>Auto uses a .txt with the same name as the model, falling back to the names embedded in the model.</small></label>
+</div>
+<div data-pipeline="two_stage" hidden>
+<label>Two-stage model<select name="two_stage_model" required>{% for p in two_stage %}<option value="{{ p.name }}">{{ p.name }}</option>{% endfor %}</select><small>Pairs <code>&lt;name&gt;_stage1_detector.onnx</code> with <code>&lt;name&gt;_stage2_classifier.onnx</code>. If the detector has an <i>animal</i> class, only animal boxes are classified; people and vehicles keep the detector label.</small></label>
+</div>
+<label>Confidence threshold<input type="number" name="conf" min="0" max="1" step="0.01" value="0.25"><small>Minimum detector confidence. With two-stage detectors this filters stage 1 boxes; the CSV confidence is the classifier probability.</small></label>
+<label>IoU (NMS) threshold<input type="number" name="iou" min="0" max="1" step="0.01" value="0.45"><small>Only used for raw (non end-to-end) ONNX exports.</small></label>
+<label>Detector input size<input type="number" name="input_size" value="0" min="0" step="32"><small>0 = use the size the model was trained at (falls back to 640).</small></label>
+<label>Image batch size<input type="number" name="batch_size" value="16" min="1" max="256" step="1"><small>How many images go through the detector in one GPU call. Higher is faster per image up to a point, but uses more GPU memory; lower this if a run fails with an out-of-memory error. Only affects images -- video frames are still processed one at a time.</small></label>
+<label>Video frame stride<input type="number" name="frame_stride" value="1" min="1"><small>1 = every frame, 30 = roughly every second for 30fps video.</small></label>
+<label class="check"><input type="checkbox" name="save_annotated" checked> Save annotated images</label>
+<div class="summary-box">Input ready: <b>{{ scan.count }}</b> files, {{ human_bytes(scan.total) }}. GPU: <b>{{ 'Ready' if gpu_ready else 'Not available' }}</b></div><button class="btn primary big" type="submit">Start detection run</button></form></section>
 {% endblock %}
+{% block scripts %}<script>pipelineToggle();</script>{% endblock %}

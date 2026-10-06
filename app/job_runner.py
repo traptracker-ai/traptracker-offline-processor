@@ -2,7 +2,7 @@ from pathlib import Path
 import threading, uuid, time, json, traceback, copy, csv
 from collections import Counter
 import cv2
-from detector import YOLO26ONNX, IMAGE_EXTS, VIDEO_EXTS
+from detector import build_detector, IMAGE_EXTS, VIDEO_EXTS
 from utils import exif_datetime
 
 JOBS = {}
@@ -14,6 +14,7 @@ _HEAVY_KEYS = {'error'}
 # Stable CSV column order so appends stay aligned across files and across resumes.
 CSV_FIELDS = [
     'filename', 'source_type', 'species', 'class_id', 'confidence',
+    'detector_class', 'detector_confidence',
     'x1', 'y1', 'x2', 'y2',
     'datetime_original', 'video_file', 'frame_number', 'timestamp_seconds',
     'source_path',
@@ -53,9 +54,17 @@ def get_job(job_id):
         return copy.deepcopy(JOBS.get(job_id, {}))
 
 
-def list_jobs(runs_dir):
+def list_jobs(runs_dir, limit=None):
+    """List runs, newest first. job_id is a timestamp prefix
+    ('YYYYmmdd-HHMMSS-...'), so sorting paths lexicographically already
+    orders them newest-first with no need to open any file -- read and
+    parse only `limit` of them (every page load wants just the 8 most
+    recent) instead of every run's status.json that has ever existed."""
+    paths = sorted(Path(runs_dir).glob('*/status.json'), reverse=True)
+    if limit is not None:
+        paths = paths[:limit]
     items = []
-    for status in sorted(Path(runs_dir).glob('*/status.json'), reverse=True):
+    for status in paths:
         try:
             items.append(json.loads(status.read_text(encoding='utf-8')))
         except Exception:
@@ -97,6 +106,28 @@ def _summary_from_csv(csv_path):
     return counter, detections
 
 
+def _slim_config(config):
+    """A copy of config with 'files' reduced to a count.
+
+    The full config (files list intact) is what the background thread
+    itself runs on, via its own `args=(job_id, config)` reference below --
+    this slimmed copy is only for JOBS[job_id], which get_job()/_set() both
+    deepcopy on every call (every status update from the running job, every
+    1.5s UI poll via /api/jobs/<id>, every /runs/<id> page load). With a
+    large input folder that 'files' list can be tens of thousands of path
+    strings; deepcopying and then JSON-serializing it repeatedly -- for the
+    entire duration of the job, under a lock shared with the job thread's
+    own progress updates -- was previously real, continuous, avoidable cost
+    that scaled with input size and had nothing to do with actual detection
+    work. The API/UI never reads config.files at all.
+    """
+    slim = dict(config)
+    files = slim.get('files')
+    if isinstance(files, list):
+        slim['files'] = len(files)
+    return slim
+
+
 def start_job(config, resume_job_id=None):
     if resume_job_id:
         job_id = resume_job_id
@@ -106,7 +137,7 @@ def start_job(config, resume_job_id=None):
     (run_dir / 'annotated').mkdir(parents=True, exist_ok=True)
     _set(job_id, id=job_id, status='queued', progress=0, message='Queued',
          run_dir=str(run_dir), started=time.strftime('%Y-%m-%d %H:%M:%S'),
-         config=config, processed=0, detections=0, failed=0,
+         config=_slim_config(config), processed=0, detections=0, failed=0,
          total=len(config.get('files', [])), resumed=bool(resume_job_id))
     t = threading.Thread(target=_run, args=(job_id, config), daemon=True)
     t.start()
@@ -120,24 +151,54 @@ def _safe_rel(path, root):
         return path.name
 
 
-def _process_image(detector, path, relname, run_dir, save_annotated):
-    img = cv2.imread(str(path))
-    if img is None:
-        raise ValueError('OpenCV could not read image')
-    dets = detector.detect_image_array(img, filename=relname)
-    dt = exif_datetime(path)
-    for d in dets:
-        d['source_type'] = 'image'
-        d['datetime_original'] = dt
-        d['source_path'] = str(path)
-    if save_annotated and dets:
-        ann = detector.annotate(img, dets)
-        out = Path(run_dir) / 'annotated' / relname
-        out.parent.mkdir(parents=True, exist_ok=True)
-        ok = cv2.imwrite(str(out.with_suffix('.jpg')), ann)
-        if not ok:
-            cv2.imwrite(str(out.with_suffix('.png')), ann)
-    return dets
+def _process_image_batch(detector, items, run_dir, save_annotated):
+    """Run a batch of (path, relname) images through the detector in ONE
+    inference call instead of one call per image (see
+    detector.YOLOONNX.detect_batch for why this matters at scale), then do
+    the same per-image EXIF/annotate/write work a single-image path would.
+
+    Returns a list of (path, relname, dets, error) in the same order as
+    `items`, so the caller can record each one exactly as it would a
+    single-image result -- a decode failure for one file does not drop the
+    rest of the batch.
+    """
+    images, ok_items, results = [], [], [None] * len(items)
+    for i, (path, relname) in enumerate(items):
+        img = cv2.imread(str(path))
+        if img is None:
+            results[i] = (path, relname, [], 'OpenCV could not read image')
+            continue
+        images.append(img)
+        ok_items.append((i, path, relname))
+
+    if images:
+        try:
+            batch_dets = detector.detect_batch(images, filenames=[r for _, _, r in ok_items])
+        except Exception as e:  # noqa: BLE001 - isolate a batch-level failure per file
+            batch_dets = [None] * len(images)
+            batch_error = str(e)
+        else:
+            batch_error = None
+
+        for (i, path, relname), img, dets in zip(ok_items, images, batch_dets):
+            if dets is None:
+                results[i] = (path, relname, [], batch_error)
+                continue
+            dt = exif_datetime(path)
+            for d in dets:
+                d['source_type'] = 'image'
+                d['datetime_original'] = dt
+                d['source_path'] = str(path)
+            if save_annotated and dets:
+                ann = detector.annotate(img, dets)
+                out = Path(run_dir) / 'annotated' / relname
+                out.parent.mkdir(parents=True, exist_ok=True)
+                ok = cv2.imwrite(str(out.with_suffix('.jpg')), ann)
+                if not ok:
+                    cv2.imwrite(str(out.with_suffix('.png')), ann)
+            results[i] = (path, relname, dets, None)
+
+    return results
 
 
 def _process_video(detector, path, relname, run_dir, save_annotated, frame_stride, max_annotated=2000):
@@ -186,13 +247,11 @@ def _run(job_id, config):
     manifest_path = run_dir / 'manifest.jsonl'
 
     try:
-        _set(job_id, status='loading', message='Loading ONNX model')
+        two_stage = config.get('pipeline') == 'two_stage'
+        _set(job_id, status='loading',
+             message='Loading detector and classifier models' if two_stage else 'Loading ONNX model')
         providers = [p.strip() for p in config.get('providers', 'CUDAExecutionProvider,CPUExecutionProvider').split(',') if p.strip()]
-        detector = YOLO26ONNX(
-            config['model_path'], config['classes_path'], providers=providers,
-            input_size=config.get('input_size', 640), conf=config.get('conf', 0.25),
-            iou=config.get('iou', 0.45),
-        )
+        detector = build_detector(config, providers=providers)
 
         all_files = [Path(p) for p in config['files']]
         total = len(all_files)
@@ -218,60 +277,108 @@ def _run(job_id, config):
         root = Path(config.get('input_root') or '/')
         frame_stride = int(config.get('frame_stride', 1))
         save_annotated = config.get('save_annotated', True)
+        # Images are processed in batches through the detector (one inference
+        # call per batch instead of one per image -- see detector.detect_batch);
+        # videos are still handled frame-by-frame, unchanged. 16 is a
+        # conservative default that fits comfortably in GPU memory for the
+        # model sizes this app ships; raise it (config['batch_size']) if you
+        # have memory to spare, or lower it if a run hits an out-of-memory error.
+        batch_size = max(1, int(config.get('batch_size', 16)))
 
-        csv_exists = csv_path.exists()
+        csv_exists = csv_path.exists() and csv_path.stat().st_size > 0
+        # On resume, keep the existing header so rows stay aligned with CSVs
+        # written by earlier versions that had fewer columns.
+        fieldnames = CSV_FIELDS
+        if csv_exists:
+            with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                header = next(csv.reader(f), None)
+            if header:
+                fieldnames = header
         # Open CSV in append mode so a resume continues the same file.
         csv_f = open(csv_path, 'a', newline='', encoding='utf-8')
-        writer = csv.DictWriter(csv_f, fieldnames=CSV_FIELDS, extrasaction='ignore')
-        if not csv_exists or csv_path.stat().st_size == 0:
+        writer = csv.DictWriter(csv_f, fieldnames=fieldnames, extrasaction='ignore')
+        if not csv_exists:
             writer.writeheader()
             csv_f.flush()
         manifest_f = open(manifest_path, 'a', encoding='utf-8')
 
         last_ui = 0.0
+
+        def _record(path, relname, file_dets, error):
+            """Common bookkeeping for one finished file, whether it came out
+            of an image batch or the per-frame video path: write its
+            detections, update the manifest, and throttle UI/status writes.
+            Does NOT flush -- the caller flushes once per batch instead of
+            once per file, since fsync-ing after every single file is most
+            of the I/O cost at large scale and buys little durability a
+            per-batch flush doesn't already give (worst case on a crash: redo
+            one batch, same as the pre-existing per-file granularity already
+            tolerated losing partial progress on a crash mid-write).
+            """
+            nonlocal processed, detections, failures_count, last_ui
+            spath = str(path)
+            if error is not None:
+                failures_count += 1
+            if file_dets:
+                for d in file_dets:
+                    writer.writerow(d)
+                    counter[d.get('species', '')] += 1
+                detections += len(file_dets)
+            manifest_f.write(json.dumps({'path': spath, 'ok': error is None,
+                                         'error': error, 'n': len(file_dets)}) + '\n')
+            processed += 1
+            now = time.time()
+            if now - last_ui > 0.3 or processed == total:
+                last_ui = now
+                summary = [{'species': s, 'count': c} for s, c in counter.most_common(50)]
+                _set(job_id, processed=processed, detections=detections,
+                     failed=failures_count,
+                     progress=int(processed / total * 100) if total else 100,
+                     message=f'Processed {processed}/{total}', summary=summary)
+
         try:
+            image_batch = []  # list of (path, relname) awaiting a batched detector call
             for path in all_files:
                 spath = str(path)
                 if spath in done_paths:
                     continue
-                file_dets = []
-                error = None
-                try:
-                    relname = _safe_rel(path, root)
-                    ext = path.suffix.lower()
-                    if ext in IMAGE_EXTS:
-                        file_dets = _process_image(detector, path, relname, run_dir, save_annotated)
-                    elif ext in VIDEO_EXTS:
-                        file_dets = _process_video(detector, path, relname, run_dir, save_annotated, frame_stride)
-                except Exception as e:
-                    error = str(e)
-                    failures_count += 1
+                ext = path.suffix.lower()
 
-                # Persist this file's detections immediately.
-                if file_dets:
-                    for d in file_dets:
-                        writer.writerow(d)
-                        counter[d.get('species', '')] += 1
-                    detections += len(file_dets)
+                if ext in IMAGE_EXTS:
+                    image_batch.append((path, _safe_rel(path, root)))
+                    if len(image_batch) >= batch_size:
+                        for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, save_annotated):
+                            _record(p, relname, dets, error)
+                        image_batch = []
+                        csv_f.flush()
+                        manifest_f.flush()
+                    continue
+
+                # A non-image file ends the current run of batched images.
+                if image_batch:
+                    for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, save_annotated):
+                        _record(p, relname, dets, error)
+                    image_batch = []
                     csv_f.flush()
+                    manifest_f.flush()
 
-                # Record the file as handled (done or failed) in the resume ledger.
-                manifest_f.write(json.dumps({'path': spath, 'ok': error is None,
-                                             'error': error, 'n': len(file_dets)}) + '\n')
-                manifest_f.flush()
-                processed += 1
+                if ext in VIDEO_EXTS:
+                    relname = _safe_rel(path, root)
+                    file_dets, error = [], None
+                    try:
+                        file_dets = _process_video(detector, path, relname, run_dir, save_annotated, frame_stride)
+                    except Exception as e:
+                        error = str(e)
+                    _record(path, relname, file_dets, error)
+                    csv_f.flush()
+                    manifest_f.flush()
 
-                # Throttle UI/status writes so per-file work isn't dominated by I/O
-                # at very large scale: at most ~3 updates/sec, plus the final file.
-                now = time.time()
-                if now - last_ui > 0.3 or processed == total:
-                    last_ui = now
-                    summary = [{'species': s, 'count': c} for s, c in counter.most_common(50)]
-                    _set(job_id, processed=processed, detections=detections,
-                         failed=failures_count,
-                         progress=int(processed / total * 100) if total else 100,
-                         message=f'Processed {processed}/{total}', summary=summary)
+            if image_batch:
+                for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, save_annotated):
+                    _record(p, relname, dets, error)
         finally:
+            csv_f.flush()
+            manifest_f.flush()
             csv_f.close()
             manifest_f.close()
 

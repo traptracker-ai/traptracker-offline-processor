@@ -1,9 +1,10 @@
-import os, shutil, json, secrets
+import os, shutil, json, csv, secrets
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, flash, abort
 from werkzeug.utils import secure_filename
 from detector import available_providers, IMAGE_EXTS, VIDEO_EXTS
-from utils import scan_inputs, list_models, list_class_files, human_bytes, safe_copy_upload
+from utils import (scan_inputs, scan_inputs_cached, invalidate_scan_cache, start_scan_refresher,
+                   list_models, list_class_files, list_two_stage_pipelines, human_bytes, safe_copy_upload)
 from job_runner import start_job, get_job, list_jobs
 
 BASE = Path(__file__).resolve().parent.parent
@@ -14,6 +15,11 @@ RUNS_DIR = Path(os.environ.get('RUNS_DIR', BASE / 'runs'))
 CLASSES_PATH = MODEL_DIR / 'classes.txt'
 for p in [MODEL_DIR, INPUT_DIR, OUTPUT_DIR, RUNS_DIR]:
     p.mkdir(parents=True, exist_ok=True)
+
+# Start keeping the input-folder scan warm immediately, before the first
+# request ever arrives -- see utils.start_scan_refresher for why a
+# request-time cache alone isn't enough on a large input folder.
+start_scan_refresher(INPUT_DIR)
 
 app = Flask(__name__)
 # Use a stable secret if provided (so flash messages survive restarts / multiple workers),
@@ -48,14 +54,28 @@ def _load_status(job_id):
     return {}
 
 
-def context():
-    scan = scan_inputs(INPUT_DIR)
+_EMPTY_SCAN = {'files': [], 'total': 0, 'images': 0, 'videos': 0, 'count': 0}
+
+
+def context(need_scan=True):
+    """Build the data every page's base template needs.
+
+    need_scan=False skips the input-folder walk entirely for pages that never
+    render it (runs/run_detail/settings/gallery) -- with a large input folder
+    (tens of thousands of files) that walk is the single most expensive thing
+    a page load can do, so routes that don't need it shouldn't pay for it.
+    Routes that do need it get a briefly-cached result (see
+    utils.scan_inputs_cached) so quick repeat navigation doesn't re-walk the
+    folder on every click either.
+    """
+    scan = scan_inputs_cached(INPUT_DIR) if need_scan else _EMPTY_SCAN
     models = list_models(MODEL_DIR)
     class_files = list_class_files(MODEL_DIR)
+    two_stage = list_two_stage_pipelines(MODEL_DIR)
     providers = available_providers()
     gpu_ready = 'CUDAExecutionProvider' in providers or 'TensorrtExecutionProvider' in providers
-    jobs = list_jobs(RUNS_DIR)[:8]
-    return dict(scan=scan, models=models, class_files=class_files, providers=providers, gpu_ready=gpu_ready, jobs=jobs, human_bytes=human_bytes)
+    jobs = list_jobs(RUNS_DIR, limit=8)
+    return dict(scan=scan, models=models, class_files=class_files, two_stage=two_stage, providers=providers, gpu_ready=gpu_ready, jobs=jobs, human_bytes=human_bytes)
 
 
 @app.route('/')
@@ -81,6 +101,7 @@ def input_manager():
                     saved += 1
                 except Exception:
                     pass
+        invalidate_scan_cache(INPUT_DIR)
         flash(f'Saved {saved} files to input folder')
         return redirect(url_for('input_manager'))
     return render_template('input.html', **context())
@@ -97,6 +118,7 @@ def clear_input():
                     shutil.rmtree(p)
             except Exception:
                 pass
+    invalidate_scan_cache(INPUT_DIR)
     flash('Input folder cleared')
     return redirect(url_for('input_manager'))
 
@@ -104,26 +126,62 @@ def clear_input():
 @app.route('/processing', methods=['GET', 'POST'])
 def processing():
     if request.method == 'POST':
-        model = request.form.get('model')
-        if not model or secure_filename(model) != model or not (MODEL_DIR / model).exists():
-            flash('Please select a valid ONNX model')
-            return redirect(url_for('processing'))
-        scan = scan_inputs(INPUT_DIR)
+        pipeline = request.form.get('pipeline', 'single_stage')
+        # Model choices are only accepted if they appear in the server-side
+        # listings, which also keeps user input from escaping MODEL_DIR.
+        if pipeline == 'two_stage':
+            pipelines = {p['name']: p for p in list_two_stage_pipelines(MODEL_DIR)}
+            chosen_pipeline = pipelines.get(request.form.get('two_stage_model', ''))
+            if not chosen_pipeline:
+                flash('Please select a valid two-stage detector')
+                return redirect(url_for('processing'))
+            model_config = {
+                'pipeline': 'two_stage',
+                'pipeline_name': chosen_pipeline['name'],
+                'model_path': str(MODEL_DIR / chosen_pipeline['detector']),
+                'classifier_path': str(MODEL_DIR / chosen_pipeline['classifier']),
+                'classifier_classes_path': str(MODEL_DIR / chosen_pipeline['classes']) if chosen_pipeline['classes'] else '',
+            }
+        else:
+            model = request.form.get('model')
+            if not model or model not in list_models(MODEL_DIR):
+                flash('Please select a valid ONNX model')
+                return redirect(url_for('processing'))
+
+            # Resolve the classes file. Priority: explicit selection (validated) ->
+            # a .txt sharing the model's stem -> the legacy models/classes.txt ->
+            # the class names embedded in the model.
+            classes_path = ''
+            chosen = request.form.get('classes')
+            if chosen and chosen in list_class_files(MODEL_DIR):
+                classes_path = MODEL_DIR / chosen
+            else:
+                same_stem = (MODEL_DIR / model).with_suffix('.txt')
+                if same_stem.exists():
+                    classes_path = same_stem
+                elif CLASSES_PATH.exists():
+                    classes_path = CLASSES_PATH
+            model_config = {
+                'pipeline': 'single_stage',
+                'pipeline_name': Path(model).stem,
+                'model_path': str(MODEL_DIR / model),
+                'classes_path': str(classes_path),
+            }
+
+        # Cached, not a fresh scan_inputs() call: on a large input folder, a
+        # full walk can itself take well over a minute on some filesystems
+        # (observed on a Windows Docker bind mount with ~21k files), which
+        # would otherwise make clicking "Start detection run" hang for that
+        # long before the job even begins. The brief cache window means a
+        # file dropped into the folder by hand in the last few seconds
+        # (outside this app's own upload/clear actions, which already
+        # invalidate the cache immediately) could be missed by this run --
+        # an acceptable trade for not blocking job start on a multi-minute scan.
+        scan = scan_inputs_cached(INPUT_DIR)
         files = [f['path'] for f in scan['files']]
         if not files:
             flash('No input files found. Add files in the Input Manager first.')
             return redirect(url_for('input_manager'))
-
-        # Resolve the classes file. Priority: explicit selection (validated) ->
-        # a .txt sharing the model's stem -> the legacy models/classes.txt.
-        classes_path = CLASSES_PATH
-        chosen = request.form.get('classes')
-        if chosen and secure_filename(chosen) == chosen and (MODEL_DIR / chosen).exists():
-            classes_path = MODEL_DIR / chosen
-        else:
-            same_stem = MODEL_DIR / (Path(model).stem + '.txt')
-            if same_stem.exists():
-                classes_path = same_stem
 
         def _num(name, default, cast, lo=None, hi=None):
             try:
@@ -137,14 +195,15 @@ def processing():
             return v
 
         config = {
-            'model_path': str(MODEL_DIR / model),
-            'classes_path': str(classes_path),
+            **model_config,
             'files': files,
             'input_root': str(INPUT_DIR),
             'runs_dir': str(RUNS_DIR),
             'conf': _num('conf', 0.25, float, 0.0, 1.0),
             'iou': _num('iou', 0.45, float, 0.0, 1.0),
-            'input_size': _num('input_size', 640, int, 32, 4096),
+            # 0 = auto: use the size the model was trained at.
+            'input_size': _num('input_size', 0, int, 0, 4096),
+            'batch_size': _num('batch_size', 16, int, 1, 256),
             'frame_stride': _num('frame_stride', 1, int, 1),
             'save_annotated': request.form.get('save_annotated') == 'on',
             'providers': os.environ.get('ORT_PROVIDERS', 'CUDAExecutionProvider,CPUExecutionProvider'),
@@ -156,13 +215,13 @@ def processing():
 
 @app.route('/runs')
 def runs():
-    return render_template('runs.html', **context(), all_jobs=list_jobs(RUNS_DIR))
+    return render_template('runs.html', **context(need_scan=False), all_jobs=list_jobs(RUNS_DIR))
 
 
 @app.route('/runs/<job_id>')
 def run_detail(job_id):
     job = _load_status(job_id)
-    return render_template('run_detail.html', **context(), job=job or None, job_id=job_id)
+    return render_template('run_detail.html', **context(need_scan=False), job=job or None, job_id=job_id)
 
 
 @app.route('/api/jobs/<job_id>')
@@ -232,12 +291,48 @@ def resume_run(job_id):
 @app.route('/gallery/<job_id>')
 def gallery(job_id):
     base, ann = _safe_run_path(job_id, 'annotated')
+    species_filter = request.args.get('species', '').strip()
+
+    # Driven by detections.csv rather than walking the annotated folder: for
+    # a large run that folder can hold thousands of images, and an unfiltered
+    # directory walk pays for all of them every time regardless of how many
+    # are actually shown. The CSV already has filename -> species for every
+    # detection, so it doubles as the species-filter index for free, and is
+    # typically far smaller than the full image count (no detection = no row).
+    filename_species = {}  # relname -> set of species seen in that file
+    order = []  # relnames in first-seen (= processing) order
+    all_species = set()
+    csv_path = base / 'detections.csv'
+    if csv_path.is_file():
+        with open(csv_path, newline='', encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                fn = row.get('filename') or ''
+                if not fn:
+                    continue
+                sp = row.get('species') or ''
+                if fn not in filename_species:
+                    filename_species[fn] = set()
+                    order.append(fn)
+                if sp:
+                    filename_species[fn].add(sp)
+                    all_species.add(sp)
+
+    relnames = [fn for fn in order if not species_filter or species_filter in filename_species[fn]]
+
     imgs = []
-    if ann.exists():
-        for p in ann.rglob('*'):
-            if p.suffix.lower() in IMAGE_EXTS:
-                imgs.append(str(p.relative_to(base)))
-    return render_template('gallery.html', **context(), job_id=job_id, images=imgs[:300])
+    for fn in relnames:
+        stem_path = Path(fn)
+        for suffix in ('.jpg', '.png'):
+            candidate = ann / stem_path.with_suffix(suffix)
+            if candidate.is_file():
+                imgs.append(str(candidate.relative_to(base)))
+                break
+        if len(imgs) >= 300:
+            break
+
+    return render_template('gallery.html', **context(need_scan=False), job_id=job_id,
+                           images=imgs, all_species=sorted(all_species),
+                           species_filter=species_filter)
 
 
 @app.route('/runs/<job_id>/file/<path:rel>')
@@ -250,7 +345,7 @@ def run_file(job_id, rel):
 
 @app.route('/settings')
 def settings():
-    return render_template('settings.html', **context(), model_dir=MODEL_DIR, input_dir=INPUT_DIR, runs_dir=RUNS_DIR, classes_path=CLASSES_PATH)
+    return render_template('settings.html', **context(need_scan=False), model_dir=MODEL_DIR, input_dir=INPUT_DIR, runs_dir=RUNS_DIR, classes_path=CLASSES_PATH)
 
 
 if __name__ == '__main__':

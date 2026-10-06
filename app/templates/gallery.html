@@ -1,4 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}Annotated Gallery{% endblock %}
 {% block subtitle %}{{ job_id }}{% endblock %}
-{% block content %}<section class="gallery">{% for img in images %}<a class="thumb" href="/runs/{{ job_id }}/file/{{ img }}" target="_blank"><img src="/runs/{{ job_id }}/file/{{ img }}"><span>{{ img }}</span></a>{% else %}<div class="card">No annotated images found.</div>{% endfor %}</section>{% endblock %}
+{% block content %}
+<section class="card narrow"><form method="get" class="form inline"><label>Species<select name="species" onchange="this.form.submit()"><option value="">All species</option>{% for s in all_species %}<option value="{{ s }}"{% if s == species_filter %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>{% if species_filter %}<a class="btn" href="/gallery/{{ job_id }}">Clear filter</a>{% endif %}</form></section>
+<section class="gallery">{% for img in images %}<a class="thumb" href="/runs/{{ job_id }}/file/{{ img }}" target="_blank"><img src="/runs/{{ job_id }}/file/{{ img }}"><span>{{ img }}</span></a>{% else %}<div class="card">{% if species_filter %}No annotated images found for "{{ species_filter }}".{% else %}No annotated images found.{% endif %}</div>{% endfor %}</section>
+{% endblock %}

@@ -60,3 +60,20 @@ function pollJob(){
   }
   tick();
 }
+
+// Processing page: show only the fields for the selected pipeline. Hidden
+// fields are disabled so they are neither submitted nor validated.
+function pipelineToggle(){
+  const radios = document.querySelectorAll('input[name="pipeline"]');
+  const groups = document.querySelectorAll('[data-pipeline]');
+  function apply(){
+    const selected = document.querySelector('input[name="pipeline"]:checked')?.value;
+    groups.forEach(g => {
+      const on = g.dataset.pipeline === selected;
+      g.hidden = !on;
+      g.querySelectorAll('select,input').forEach(el => { el.disabled = !on; });
+    });
+  }
+  radios.forEach(r => r.addEventListener('change', apply));
+  apply();
+}
