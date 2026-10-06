@@ -374,6 +374,25 @@ class CropClassifierONNX:
                 'labels may be wrong.'
             )
 
+        # Optional class_groups metadata: {label: detector class it belongs under}.
+        # TwoStageDetector uses it to keep each box's label within its detector class.
+        self.class_groups = None
+        groups = _parse_literal(meta.get('class_groups'))
+        if groups is not None:
+            if isinstance(groups, dict) and self.classes and (not n_out or len(self.classes) == n_out):
+                self.class_groups = {str(k): str(v).lower() for k, v in groups.items()}
+                ungrouped = [c for c in self.classes if c not in self.class_groups]
+                if ungrouped:
+                    self.warnings.append(
+                        f'class_groups in {Path(self.model_path).name} has no group for '
+                        f'{", ".join(ungrouped)}; those labels will never be predicted.'
+                    )
+            else:
+                self.warnings.append(
+                    f'Ignoring class_groups metadata in {Path(self.model_path).name}: it is malformed '
+                    'or the class list does not match the model outputs.'
+                )
+
     def _crop(self, image_bgr, box):
         """Square crop around the box (DeepFaune convention), clipped to the image."""
         h, w = image_bgr.shape[:2]
@@ -395,8 +414,14 @@ class CropClassifierONNX:
         rgb = (rgb - self.mean) / self.std
         return np.transpose(rgb, (2, 0, 1))
 
-    def classify(self, image_bgr, boxes):
-        """Return one (class_id, label, prob) per box, or None where no crop was possible."""
+    def classify(self, image_bgr, boxes, masks=None):
+        """Return one (class_id, label, prob) per box, or None where no crop was possible.
+
+        masks, if given, holds one boolean array per box marking the labels that
+        box may take. The prob returned is still from the softmax over all
+        labels, so a crop that doesn't look like any allowed label keeps a low
+        confidence instead of being inflated by the restriction.
+        """
         results = [None] * len(boxes)
         tensors, idx = [], []
         for i, box in enumerate(boxes):
@@ -412,7 +437,10 @@ class CropClassifierONNX:
             probs = np.exp(logits)
             probs /= probs.sum(axis=1, keepdims=True)
             for row, i in zip(probs, idx[start:start + self.batch_size]):
-                c = int(np.argmax(row))
+                if masks is not None and masks[i] is not None:
+                    c = int(np.argmax(np.where(masks[i], row, -1.0)))
+                else:
+                    c = int(np.argmax(row))
                 label = self.classes[c] if 0 <= c < len(self.classes) else str(c)
                 results[i] = (c, label, float(row[c]))
         return results
@@ -421,10 +449,15 @@ class CropClassifierONNX:
 class TwoStageDetector:
     """Stage 1 finds boxes, stage 2 classifies each crop to species.
 
-    If the stage 1 detector has an 'animal' class (MegaDetector-style), only
-    animal boxes are sent to the classifier; person/vehicle/etc. keep their
-    detector label. If it has no 'animal' class (e.g. a species detector), every
-    box is reclassified.
+    If the classifier carries class_groups metadata ({label: detector class}),
+    each box is classified only among the labels grouped under its detector
+    class, so an 'animal' box can never come back as e.g. 'Car'. Boxes whose
+    detector class has no labels keep their detector label.
+
+    Without class_groups: if the stage 1 detector has an 'animal' class
+    (MegaDetector-style), only animal boxes are sent to the classifier and
+    person/vehicle/etc. keep their detector label; if it has no 'animal' class
+    (e.g. a species detector), every box is reclassified over all labels.
     """
 
     def __init__(self, detector_path, classifier_path, classifier_classes_path='', providers=None,
@@ -433,11 +466,27 @@ class TwoStageDetector:
                                  input_size=input_size, conf=conf, iou=iou)
         self.classifier = CropClassifierONNX(classifier_path, classifier_classes_path, providers=providers)
         det_classes = [c.lower() for c in self.detector.classes]
-        self.classify_ids = {i for i, c in enumerate(det_classes) if c == 'animal'} or None
         self.input_size = self.detector.input_size
         self.providers = self.detector.providers
         self.on_gpu = self.detector.on_gpu and self.classifier.on_gpu
         self.warnings = self.detector.warnings + self.classifier.warnings
+
+        # Per detector class id: boolean mask of the labels its boxes may take.
+        self.group_masks = None
+        groups = self.classifier.class_groups
+        if groups:
+            label_groups = [groups.get(c) for c in self.classifier.classes]
+            masks = {i: np.array([g == name for g in label_groups])
+                     for i, name in enumerate(det_classes)}
+            self.group_masks = {i: m for i, m in masks.items() if m.any()}
+            if not self.group_masks:
+                self.warnings.append(
+                    'Classifier class_groups match none of the detector classes '
+                    f'({", ".join(self.detector.classes)}); detector labels are kept unchanged.'
+                )
+            self.classify_ids = set(self.group_masks)
+        else:
+            self.classify_ids = {i for i, c in enumerate(det_classes) if c == 'animal'} or None
 
     def _classify_rows(self, image_bgr, rows):
         for d in rows:
@@ -446,7 +495,9 @@ class TwoStageDetector:
         targets = [d for d in rows if self.classify_ids is None or d['class_id'] in self.classify_ids]
         if targets:
             boxes = [(d['x1'], d['y1'], d['x2'], d['y2']) for d in targets]
-            for d, res in zip(targets, self.classifier.classify(image_bgr, boxes)):
+            masks = ([self.group_masks[d['class_id']] for d in targets]
+                     if self.group_masks is not None else None)
+            for d, res in zip(targets, self.classifier.classify(image_bgr, boxes, masks)):
                 if res is None:
                     continue
                 c, label, prob = res
