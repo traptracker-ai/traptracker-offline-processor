@@ -4,6 +4,7 @@ import json
 import cv2
 import numpy as np
 import onnxruntime as ort
+from PIL import Image
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff'}
 VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.m4v'}
@@ -352,6 +353,14 @@ class CropClassifierONNX:
                 size = 0
         self.input_size = size if size > 0 else 182
 
+        # Fraction of the box's longer side added as context on every side before
+        # the square crop -- must match how the classifier's training crops were made.
+        try:
+            self.crop_padding = min(max(float(meta.get('crop_padding', 0) or 0), 0.0), 1.0)
+        except ValueError:
+            self.crop_padding = 0.0
+            self.warnings.append(f'Ignoring malformed crop_padding metadata in {Path(self.model_path).name}.')
+
         mean = _parse_literal(meta.get('mean')) or [0.485, 0.456, 0.406]
         std = _parse_literal(meta.get('std')) or [0.229, 0.224, 0.225]
         self.mean = np.asarray(mean, dtype=np.float32).reshape(1, 1, 3)
@@ -394,23 +403,29 @@ class CropClassifierONNX:
                 )
 
     def _crop(self, image_bgr, box):
-        """Square crop around the box (DeepFaune convention), clipped to the image."""
+        """Square crop around the box (DeepFaune convention), clipped to the image.
+
+        The box is first padded by crop_padding x its longer side on every side,
+        then expanded to a square about its centre.
+        """
         h, w = image_bgr.shape[:2]
-        x1, y1, x2, y2 = [int(round(v)) for v in box]
-        bw, bh = x2 - x1, y2 - y1
-        if bw > bh:
-            pad = (bw - bh) // 2
-            y1, y2 = y1 - pad, y2 + pad
-        elif bh > bw:
-            pad = (bh - bw) // 2
-            x1, x2 = x1 - pad, x2 + pad
-        crop = image_bgr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
-        return crop if crop.size else None
+        x1, y1, x2, y2 = [float(v) for v in box]
+        pad = self.crop_padding * max(x2 - x1, y2 - y1)
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        half = max(x2 - x1, y2 - y1) / 2 + pad
+        x1, y1 = max(0, int(np.floor(cx - half))), max(0, int(np.floor(cy - half)))
+        x2, y2 = min(w, int(np.ceil(cx + half))), min(h, int(np.ceil(cy + half)))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return None
+        return image_bgr[y1:y2, x1:x2]
 
     def _preprocess(self, crop_bgr):
+        # Antialiased bilinear resize (PIL), the same resampling torchvision's
+        # Resize applies at training time; cv2's cubic doesn't antialias, which
+        # adds aliasing when large crops are shrunk to the classifier's size.
         size = self.input_size
-        resized = cv2.resize(crop_bgr, (size, size), interpolation=cv2.INTER_CUBIC)
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        rgb = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+        rgb = np.asarray(rgb.resize((size, size), Image.BILINEAR), dtype=np.float32) / 255.0
         rgb = (rgb - self.mean) / self.std
         return np.transpose(rgb, (2, 0, 1))
 
