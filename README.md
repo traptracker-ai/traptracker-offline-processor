@@ -2,6 +2,8 @@
 
 Trap Tracker Offline Processor is a Docker-based web application for processing camera trap image and video datasets locally. It is designed for conservationists, researchers and biodiversity practitioners who need to run AI-assisted wildlife detection without relying on a hosted cloud platform.
 
+It runs two kinds of model: single-stage YOLO detectors that find and name species in one pass, and two-stage DeepFaune pipelines, where MegaDetector v6 finds each animal and a DeepFaune species classifier names it (for example DeepFaune-UK and DeepFaune-SSA, published on Zenodo).
+
 This repository contains the application code and Docker configuration. Large model weights are not included.
 
 ## Intended use
@@ -18,6 +20,7 @@ Commercial use requires prior written permission. See [`COMMERCIAL_USE.md`](COMM
 - ONNX Runtime GPU inference
 - CUDA provider detection
 - Support for user-supplied ONNX models
+- Single-stage YOLO detectors and two-stage DeepFaune pipelines (MegaDetector v6 + species classifier)
 - Each model uses its own class-name file, checked against the model
 - Recursive folder processing
 - Browser upload for smaller batches
