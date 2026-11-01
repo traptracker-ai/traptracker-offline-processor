@@ -9,7 +9,7 @@
 </fieldset>
 <div data-pipeline="single_stage">
 <label>ONNX model<select name="model" required>{% for m in models %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>{% if not models %}<small>No single-stage models found in <code>models/single-stage-detectors</code>.</small>{% endif %}</label>
-<label>Class names file<select name="classes"><option value="" selected>Auto (match model name)</option>{% for c in class_files %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select><small>Auto uses a .txt with the same name as the model, falling back to the names embedded in the model.</small></label>
+<p class="muted"><small>Class names come from the <code>.txt</code> with the same name as the model, or else the names embedded in the model. A class list whose length doesn't match the model is refused.</small></p>
 </div>
 <div data-pipeline="two_stage" hidden>
 <label>Two-stage model<select name="two_stage_model" required>{% for p in two_stage %}<option value="{{ p.name }}">{{ p.name }}</option>{% endfor %}</select><small>Pairs <code>&lt;name&gt;_stage1_detector.onnx</code> with <code>&lt;name&gt;_stage2_classifier.onnx</code>. If the detector has an <i>animal</i> class, only animal boxes are classified; people and vehicles keep the detector label.</small></label>

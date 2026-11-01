@@ -153,16 +153,6 @@ def list_models(model_dir):
     return sorted(names)
 
 
-def list_class_files(model_dir):
-    """Return candidate class-name files (.txt / .names) for single-stage models."""
-    root = Path(model_dir)
-    names = set()
-    for d in _single_stage_dirs(root):
-        for pattern in ('*.txt', '*.names'):
-            for x in d.glob(pattern):
-                names.add(x.relative_to(root).as_posix())
-    return sorted(names)
-
 
 def list_two_stage_pipelines(model_dir):
     """Pair <name>_stage1_detector.onnx with <name>_stage2_classifier.onnx (+ .txt)."""

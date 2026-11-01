@@ -18,7 +18,7 @@ Commercial use requires prior written permission. See [`COMMERCIAL_USE.md`](COMM
 - ONNX Runtime GPU inference
 - CUDA provider detection
 - Support for user-supplied ONNX models
-- Configurable class-name files
+- Each model uses its own class-name file, checked against the model
 - Recursive folder processing
 - Browser upload for smaller batches
 - Server-side input folder scanning for large batches
@@ -51,7 +51,7 @@ models/
     <name>_stage2_classifier.txt      # optional
 ```
 
-Single-stage models use a class file with the same name as the model by default; any `.txt` or `.names` file next to the models can also be selected. If no class file is found, the class names embedded in the ONNX model are used. ONNX files placed directly in `models/` are still treated as single-stage models.
+Single-stage models use only the class file with the same name as the model (`.txt` or `.names`); if there is none, the class names embedded in the ONNX model are used. A class file whose number of classes doesn't match the model is refused, so a model can't run with another model's class names. ONNX files placed directly in `models/` are still treated as single-stage models.
 
 Two-stage models are paired by name. The classifier's input size, normalisation and class names are read from its ONNX metadata when present (the `.txt` file is only a fallback). If the stage 1 detector has an `animal` class, only animal boxes are classified and people/vehicles keep the detector label; otherwise every box is reclassified. In the results CSV, `species` and `confidence` come from the classifier and `detector_class` / `detector_confidence` record the stage 1 result.
 

@@ -4,7 +4,7 @@ from flask import Flask, render_template, request, jsonify, send_file, redirect,
 from werkzeug.utils import secure_filename
 from detector import available_providers, IMAGE_EXTS, VIDEO_EXTS
 from utils import (scan_inputs, scan_inputs_cached, invalidate_scan_cache, start_scan_refresher,
-                   list_models, list_class_files, list_two_stage_pipelines, human_bytes, safe_copy_upload)
+                   list_models, list_two_stage_pipelines, human_bytes, safe_copy_upload)
 from job_runner import start_job, get_job, list_jobs
 
 BASE = Path(__file__).resolve().parent.parent
@@ -12,7 +12,6 @@ MODEL_DIR = Path(os.environ.get('MODEL_DIR', BASE / 'models'))
 INPUT_DIR = Path(os.environ.get('INPUT_DIR', BASE / 'input'))
 OUTPUT_DIR = Path(os.environ.get('OUTPUT_DIR', BASE / 'output'))
 RUNS_DIR = Path(os.environ.get('RUNS_DIR', BASE / 'runs'))
-CLASSES_PATH = MODEL_DIR / 'classes.txt'
 for p in [MODEL_DIR, INPUT_DIR, OUTPUT_DIR, RUNS_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -70,12 +69,11 @@ def context(need_scan=True):
     """
     scan = scan_inputs_cached(INPUT_DIR) if need_scan else _EMPTY_SCAN
     models = list_models(MODEL_DIR)
-    class_files = list_class_files(MODEL_DIR)
     two_stage = list_two_stage_pipelines(MODEL_DIR)
     providers = available_providers()
     gpu_ready = 'CUDAExecutionProvider' in providers or 'TensorrtExecutionProvider' in providers
     jobs = list_jobs(RUNS_DIR, limit=8)
-    return dict(scan=scan, models=models, class_files=class_files, two_stage=two_stage, providers=providers, gpu_ready=gpu_ready, jobs=jobs, human_bytes=human_bytes)
+    return dict(scan=scan, models=models, two_stage=two_stage, providers=providers, gpu_ready=gpu_ready, jobs=jobs, human_bytes=human_bytes)
 
 
 @app.route('/')
@@ -148,19 +146,15 @@ def processing():
                 flash('Please select a valid ONNX model')
                 return redirect(url_for('processing'))
 
-            # Resolve the classes file. Priority: explicit selection (validated) ->
-            # a .txt sharing the model's stem -> the legacy models/classes.txt ->
-            # the class names embedded in the model.
+            # Class names come only from the model's own <model>.txt / .names, else
+            # the names embedded in the model. A freely chosen or shared class file
+            # could belong to another model and silently mislabel every box.
             classes_path = ''
-            chosen = request.form.get('classes')
-            if chosen and chosen in list_class_files(MODEL_DIR):
-                classes_path = MODEL_DIR / chosen
-            else:
-                same_stem = (MODEL_DIR / model).with_suffix('.txt')
+            for ext in ('.txt', '.names'):
+                same_stem = (MODEL_DIR / model).with_suffix(ext)
                 if same_stem.exists():
                     classes_path = same_stem
-                elif CLASSES_PATH.exists():
-                    classes_path = CLASSES_PATH
+                    break
             model_config = {
                 'pipeline': 'single_stage',
                 'pipeline_name': Path(model).stem,
@@ -345,7 +339,7 @@ def run_file(job_id, rel):
 
 @app.route('/settings')
 def settings():
-    return render_template('settings.html', **context(need_scan=False), model_dir=MODEL_DIR, input_dir=INPUT_DIR, runs_dir=RUNS_DIR, classes_path=CLASSES_PATH)
+    return render_template('settings.html', **context(need_scan=False), model_dir=MODEL_DIR, input_dir=INPUT_DIR, runs_dir=RUNS_DIR)
 
 
 if __name__ == '__main__':
