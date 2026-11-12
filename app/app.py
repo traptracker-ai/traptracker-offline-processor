@@ -188,8 +188,26 @@ def processing():
                 v = min(hi, v)
             return v
 
+        # Optional copying of matching videos into OUTPUT_DIR/<folder>. The
+        # folder is reduced to one safe name so it can't escape OUTPUT_DIR.
+        copy_matches = request.form.get('copy_matches') == 'on'
+        copy_config = {'copy_matches': False}
+        if copy_matches:
+            folder = secure_filename(request.form.get('copy_folder', '').strip()) or 'matched-videos'
+            species = [s.strip() for s in request.form.get('copy_species', '').replace(';', ',').split(',') if s.strip()]
+            copy_config = {
+                'copy_matches': True,
+                'copy_folder': folder,
+                'copy_dir': str(OUTPUT_DIR / folder),
+                'copy_species': species,
+                'copy_min_conf': _num('copy_min_conf', 0.5, float, 0.0, 1.0),
+                'copy_min_frames': _num('copy_min_frames', 1, int, 1),
+                'copy_images': request.form.get('copy_images') == 'on',
+            }
+
         config = {
             **model_config,
+            **copy_config,
             'files': files,
             'input_root': str(INPUT_DIR),
             'runs_dir': str(RUNS_DIR),
@@ -242,10 +260,13 @@ def download(job_id, kind):
             make_zip(base, zip_path)
         return send_file(zip_path, as_attachment=True)
 
-    key = {'csv': 'csv', 'failed': 'failed_csv'}.get(kind)
+    key = {'csv': 'csv', 'failed': 'failed_csv', 'matched': 'matched_csv'}.get(kind)
     if not key:
         abort(404)
     path = job.get(key)
+    if kind == 'matched' and not path:
+        # Available while the run is still going, not only once it completes.
+        path = str(base / 'matched_files.csv')
     if not path or not Path(path).exists():
         abort(404)
     rp = Path(path).resolve()

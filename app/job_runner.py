@@ -1,5 +1,5 @@
 from pathlib import Path
-import threading, uuid, time, json, traceback, copy, csv
+import threading, uuid, time, json, traceback, copy, csv, re, shutil
 from collections import Counter
 import cv2
 from detector import build_detector, IMAGE_EXTS, VIDEO_EXTS
@@ -70,6 +70,64 @@ def list_jobs(runs_dir, limit=None):
         except Exception:
             pass
     return items
+
+
+MATCH_FIELDS = ['source_path', 'source_type', 'species', 'hits', 'max_confidence', 'copied_to', 'error']
+
+
+def _folder_name(species):
+    """A species label made safe to use as one folder name."""
+    name = re.sub(r'[^\w\-. ]+', '_', str(species)).strip(' .')
+    return name or 'unlabelled'
+
+
+def _match_species(dets, wanted, min_conf):
+    """Species in `dets` that the user asked to copy for.
+
+    Returns {species: (hits, max_conf)}. `hits` is the number of distinct
+    video frames (or 1 for an image) with at least one qualifying box, so a
+    single frame with three foxes counts once. An empty `wanted` set means
+    any detected label qualifies.
+    """
+    frames, best = {}, {}
+    for d in dets:
+        sp = str(d.get('species', ''))
+        try:
+            conf = float(d.get('confidence') or 0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < min_conf or not sp:
+            continue
+        if wanted and sp.lower() not in wanted:
+            continue
+        frames.setdefault(sp, set()).add(d.get('frame_number', 0))
+        best[sp] = max(best.get(sp, 0.0), conf)
+    return {sp: (len(f), best[sp]) for sp, f in frames.items()}
+
+
+def _copy_file(src, dest):
+    """Copy src to dest unless an identical-size copy is already there
+    (e.g. from before a resume)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.stat().st_size == src.stat().st_size:
+        return
+    tmp = dest.with_name(dest.name + '.part')
+    shutil.copy2(src, tmp)
+    tmp.replace(dest)
+
+
+def _load_copied(match_path):
+    """Source paths already copied (rows without an error), for resume."""
+    copied = set()
+    if Path(match_path).exists():
+        try:
+            with open(match_path, 'r', newline='', encoding='utf-8') as f:
+                for row in csv.DictReader(f):
+                    if not row.get('error'):
+                        copied.add(row.get('source_path', ''))
+        except Exception:
+            pass
+    return copied
 
 
 def _load_manifest(run_dir):
@@ -245,6 +303,7 @@ def _run(job_id, config):
     csv_path = run_dir / 'detections.csv'
     fail_path = run_dir / 'failed_files.csv'
     manifest_path = run_dir / 'manifest.jsonl'
+    match_path = run_dir / 'matched_files.csv'
 
     try:
         two_stage = config.get('pipeline') == 'two_stage'
@@ -302,6 +361,50 @@ def _run(job_id, config):
             csv_f.flush()
         manifest_f = open(manifest_path, 'a', encoding='utf-8')
 
+        # Optional: copy original videos (and optionally images) that contain
+        # the chosen species to <copy_dir>/<species>/<relative path>, so a large
+        # survey can be filtered down to the clips of interest as it runs.
+        copy_dir = Path(config['copy_dir']) if config.get('copy_matches') and config.get('copy_dir') else None
+        copy_species = {s.lower() for s in config.get('copy_species') or []}
+        copy_min_conf = float(config.get('copy_min_conf', 0.5))
+        copy_min_frames = max(1, int(config.get('copy_min_frames', 1)))
+        copy_images = bool(config.get('copy_images'))
+        copied_paths = _load_copied(match_path) if copy_dir else set()
+        match_f = match_writer = None
+        if copy_dir:
+            copy_dir.mkdir(parents=True, exist_ok=True)
+            match_exists = match_path.exists() and match_path.stat().st_size > 0
+            match_f = open(match_path, 'a', newline='', encoding='utf-8')
+            match_writer = csv.DictWriter(match_f, fieldnames=MATCH_FIELDS)
+            if not match_exists:
+                match_writer.writeheader()
+            _set(job_id, copied=len(copied_paths))
+
+        def _copy_matches(path, relname, file_dets):
+            is_video = path.suffix.lower() in VIDEO_EXTS
+            if not copy_dir or not file_dets or not (is_video or copy_images):
+                return
+            needed = copy_min_frames if is_video else 1
+            any_ok = False
+            for sp, (hits, best) in sorted(_match_species(file_dets, copy_species, copy_min_conf).items()):
+                if hits < needed:
+                    continue
+                dest = copy_dir / _folder_name(sp) / relname
+                err = ''
+                try:
+                    _copy_file(path, dest)
+                    any_ok = True
+                except Exception as e:  # noqa: BLE001 - a failed copy must not fail the run
+                    err = str(e)
+                match_writer.writerow({'source_path': str(path),
+                                       'source_type': 'video' if is_video else 'image',
+                                       'species': sp, 'hits': hits,
+                                       'max_confidence': round(best, 4),
+                                       'copied_to': str(dest), 'error': err})
+            if any_ok:
+                copied_paths.add(str(path))
+            match_f.flush()
+
         last_ui = 0.0
 
         def _record(path, relname, file_dets, error):
@@ -324,6 +427,7 @@ def _run(job_id, config):
                     writer.writerow(d)
                     counter[d.get('species', '')] += 1
                 detections += len(file_dets)
+            _copy_matches(path, relname, file_dets)
             manifest_f.write(json.dumps({'path': spath, 'ok': error is None,
                                          'error': error, 'n': len(file_dets)}) + '\n')
             processed += 1
@@ -332,7 +436,7 @@ def _run(job_id, config):
                 last_ui = now
                 summary = [{'species': s, 'count': c} for s, c in counter.most_common(50)]
                 _set(job_id, processed=processed, detections=detections,
-                     failed=failures_count,
+                     failed=failures_count, copied=len(copied_paths),
                      progress=int(processed / total * 100) if total else 100,
                      message=f'Processed {processed}/{total}', summary=summary)
 
@@ -381,6 +485,8 @@ def _run(job_id, config):
             manifest_f.flush()
             csv_f.close()
             manifest_f.close()
+            if match_f:
+                match_f.close()
 
         # Finalization phase — make it visible. The CSV is already written, so this
         # is just the failed-files report and a status flip. ZIP is built lazily on
@@ -405,8 +511,9 @@ def _run(job_id, config):
 
         summary = [{'species': s, 'count': c} for s, c in counter.most_common(50)]
         _set(job_id, status='complete', progress=100, message='Complete',
-             detections=detections, failed=failures_count,
+             detections=detections, failed=failures_count, copied=len(copied_paths),
              csv=str(csv_path), failed_csv=str(fail_path),
+             matched_csv=str(match_path) if copy_dir else '',
              summary=summary, completed=time.strftime('%Y-%m-%d %H:%M:%S'))
     except Exception as e:
         try:

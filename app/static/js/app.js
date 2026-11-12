@@ -40,6 +40,7 @@ function pollJob(){
         set('total', j.total || 0);
         set('detections', j.detections || 0);
         set('failed', j.failed || 0);
+        set('copied', j.copied || 0);
         const bar = document.getElementById('bar');
         if(bar) bar.style.width = (j.progress || 0) + '%';
         renderSummary(j.summary);
@@ -75,5 +76,15 @@ function pipelineToggle(){
     });
   }
   radios.forEach(r => r.addEventListener('change', apply));
+  apply();
+}
+
+// Processing page: show the copy options only when copying is switched on.
+function copyToggle(){
+  const box = document.getElementById('copy_matches');
+  const opts = document.getElementById('copy_options');
+  if(!box || !opts) return;
+  const apply = () => { opts.hidden = !box.checked; };
+  box.addEventListener('change', apply);
   apply();
 }

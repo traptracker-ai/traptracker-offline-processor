@@ -20,6 +20,16 @@
 <label>Image batch size<input type="number" name="batch_size" value="16" min="1" max="256" step="1"><small>How many images go through the detector in one GPU call. Higher is faster per image up to a point, but uses more GPU memory; lower this if a run fails with an out-of-memory error. Only affects images -- video frames are still processed one at a time.</small></label>
 <label>Video frame stride<input type="number" name="frame_stride" value="1" min="1"><small>1 = every frame, 30 = roughly every second for 30fps video.</small></label>
 <label class="check"><input type="checkbox" name="save_annotated" checked> Save annotated images</label>
+<fieldset class="choice"><legend>Copy matching videos</legend>
+<label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code>, keeping its sub-folder path, as soon as it is processed. A video with two chosen species is copied into both species folders. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
+<div id="copy_options" hidden>
+<label>Species to copy<input type="text" name="copy_species" placeholder="e.g. Red fox, Badger"><small>Comma-separated, matched case-insensitively against the species names in the results CSV. Leave blank to copy every video with any detection (including people and vehicles).</small></label>
+<label>Output folder name<input type="text" name="copy_folder" value="matched-videos"><small>Created inside the <code>output</code> folder.</small></label>
+<label>Minimum confidence to copy<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count. Set it higher than the detection threshold to cut false positives.</small></label>
+<label>Minimum frames with the species<input type="number" name="copy_min_frames" min="1" value="1"><small>How many processed frames must contain the species before a video is copied. Raise it to skip videos with a single stray detection. Counts only the frames that frame stride lets through.</small></label>
+<label class="check"><input type="checkbox" name="copy_images"> Also copy matching images</label>
+</div>
+</fieldset>
 <div class="summary-box">Input ready: <b>{{ scan.count }}</b> files, {{ human_bytes(scan.total) }}. GPU: <b>{{ 'Ready' if gpu_ready else 'Not available' }}</b></div><button class="btn primary big" type="submit">Start detection run</button></form></section>
 {% endblock %}
-{% block scripts %}<script>pipelineToggle();</script>{% endblock %}
+{% block scripts %}<script>pipelineToggle();copyToggle();</script>{% endblock %}
