@@ -3,35 +3,49 @@
 {% block subtitle %}Configure single-stage or two-stage ONNX inference and start a background GPU job{% endblock %}
 {% block content %}
 <section class="card narrow"><h2>New Detection Run</h2><form method="post" class="form">
+
+<div class="form-section">
+<h3>Model</h3>
 <fieldset class="choice"><legend>Detection pipeline</legend>
 <label class="check"><input type="radio" name="pipeline" value="single_stage" checked> <span>Single-stage detector<small>One model finds and labels animals in a single pass (e.g. YOLOv10, YOLO26).</small></span></label>
 <label class="check"><input type="radio" name="pipeline" value="two_stage"{% if not two_stage %} disabled{% endif %}> <span>Two-stage detector<small>A detector finds animals, then a species classifier labels each crop (e.g. DeepFaune).{% if not two_stage %} No two-stage models found in <code>models/two-stage-detectors</code>.{% endif %}</small></span></label>
 </fieldset>
 <div data-pipeline="single_stage">
-<label>ONNX model<select name="model" required>{% for m in models %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select>{% if not models %}<small>No single-stage models found in <code>models/single-stage-detectors</code>.</small>{% endif %}</label>
-<p class="muted"><small>Class names come from the <code>.txt</code> with the same name as the model, or else the names embedded in the model. A class list whose length doesn't match the model is refused.</small></p>
+<label>ONNX model<select name="model" required>{% for m in models %}<option value="{{ m }}">{{ m }}</option>{% endfor %}</select><small>{% if not models %}No single-stage models found in <code>models/single-stage-detectors</code>. {% endif %}Class names come from the <code>.txt</code> with the same name as the model, or else the names embedded in the model. A class list whose length doesn't match the model is refused.</small></label>
 </div>
 <div data-pipeline="two_stage" hidden>
 <label>Two-stage model<select name="two_stage_model" required>{% for p in two_stage %}<option value="{{ p.name }}">{{ p.name }}</option>{% endfor %}</select><small>Pairs <code>&lt;name&gt;_stage1_detector.onnx</code> with <code>&lt;name&gt;_stage2_classifier.onnx</code>. If the detector has an <i>animal</i> class, only animal boxes are classified; people and vehicles keep the detector label.</small></label>
 </div>
-<label>Confidence threshold<input type="number" name="conf" min="0" max="1" step="0.01" value="0.25"><small>Minimum detector confidence. With two-stage detectors this filters stage 1 boxes; the CSV confidence is the classifier probability.</small></label>
+</div>
+
+<div class="form-section">
+<h3>Detection settings</h3>
+<div class="form-grid">
+<label>Confidence threshold<input type="number" name="conf" min="0" max="1" step="0.01" value="0.25"><small>Minimum detector confidence. For two-stage models this filters stage 1 boxes; the CSV confidence is the classifier probability.</small></label>
 <label>IoU (NMS) threshold<input type="number" name="iou" min="0" max="1" step="0.01" value="0.45"><small>Only used for raw (non end-to-end) ONNX exports.</small></label>
-<label>Detector input size<input type="number" name="input_size" value="0" min="0" step="32"><small>0 = use the size the model was trained at (falls back to 640).</small></label>
-<label>Image batch size<input type="number" name="batch_size" value="16" min="1" max="256" step="1"><small>How many images go through the detector in one GPU call. Higher is faster per image up to a point, but uses more GPU memory; lower this if a run fails with an out-of-memory error. Only affects images -- video frames are still processed one at a time.</small></label>
-<label>Video frame stride<input type="number" name="frame_stride" value="1" min="1"><small>1 = every frame, 30 = roughly every second for 30fps video.</small></label>
-<label class="check"><input type="checkbox" name="save_annotated" checked> Save annotated images</label>
-<fieldset class="choice"><legend>Copy matching videos</legend>
-<label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code>, keeping its sub-folder path, as soon as it is processed. A video with two chosen species is copied into both species folders. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
-<div id="copy_options" hidden>
+<label>Detector input size<input type="number" name="input_size" value="0" min="0" step="32"><small>0 = the size the model was trained at (else 640).</small></label>
+<label>Image batch size<input type="number" name="batch_size" value="16" min="1" max="256" step="1"><small>Images per GPU call. Lower it if a run fails with an out-of-memory error. Images only.</small></label>
+<label>Video frame stride<input type="number" name="frame_stride" value="1" min="1"><small>1 = every frame, 30 = about one per second at 30 fps.</small></label>
+</div>
+</div>
+
+<div class="form-section">
+<h3>Outputs</h3>
+<label class="check"><input type="checkbox" name="save_annotated" checked> <span>Save annotated images<small>Images and video frames with boxes drawn, shown in the Annotated Gallery.</small></span></label>
+<label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code> as soon as it is processed, keeping its sub-folder path. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
+<div id="copy_options" class="sub-options" hidden>
 <div class="field"><span class="field-label">Species to copy</span>
 <details class="multi" id="species_picker"><summary>Any detection</summary><div class="multi-list" id="species_list"><p class="muted">Loading the model's species…</p></div></details>
-<small class="muted">Taken from the selected model's class list. Choose none to copy every video with any detection (including people and vehicles).</small></div>
-<label>Output folder name<input type="text" name="copy_folder" value="matched-videos"><small>Created inside the <code>output</code> folder.</small></label>
-<label>Minimum confidence to copy<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count. Set it higher than the detection threshold to cut false positives.</small></label>
-<label>Minimum frames with the species<input type="number" name="copy_min_frames" min="1" value="1"><small>How many processed frames must contain the species before a video is copied. Raise it to skip videos with a single stray detection. Counts only the frames that frame stride lets through.</small></label>
-<label class="check"><input type="checkbox" name="copy_images"> Also copy matching images</label>
+<small class="muted">From the selected model's class list. A video with two chosen species is copied into both folders. Choose none to copy every video with any detection, including people and vehicles.</small></div>
+<div class="form-grid three">
+<label>Output folder<input type="text" name="copy_folder" value="matched-videos"><small>Inside the <code>output</code> folder.</small></label>
+<label>Min. confidence<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count.</small></label>
+<label>Min. frames<input type="number" name="copy_min_frames" min="1" value="1"><small>Frames (after stride) with the species.</small></label>
 </div>
-</fieldset>
+<label class="check"><input type="checkbox" name="copy_images"> <span>Also copy matching images</span></label>
+</div>
+</div>
+
 <div class="summary-box">Input ready: <b>{{ scan.count }}</b> files, {{ human_bytes(scan.total) }}. GPU: <b>{{ 'Ready' if gpu_ready else 'Not available' }}</b></div><button class="btn primary big" type="submit">Start detection run</button></form></section>
 {% endblock %}
 {% block scripts %}<script>pipelineToggle();copyToggle();</script>{% endblock %}

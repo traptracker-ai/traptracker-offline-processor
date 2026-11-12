@@ -346,51 +346,131 @@ def stop_run(job_id):
     return redirect(url_for('run_detail', job_id=job_id))
 
 
+GALLERY_LIMIT = 300
+
+
+def _gallery_index(csv_path):
+    """Read detections.csv into gallery entries, in processing order.
+
+    Driven by the CSV rather than walking the annotated folder: for a large
+    run that folder can hold thousands of files, and the CSV already maps
+    every annotated file to its species (no detection = no row = no file).
+
+    Images map to annotated/<relname>.jpg (or .png). Video frames are saved as
+    annotated/<video stem>/<frame file>, so each video becomes one entry
+    holding its frames: {frame file: {species, conf, frame, ts}}.
+    """
+    entries, by_key, all_species = [], {}, set()
+    if not csv_path.is_file():
+        return entries, all_species
+    with open(csv_path, newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            fn = row.get('filename') or ''
+            if not fn:
+                continue
+            sp = row.get('species') or ''
+            if sp:
+                all_species.add(sp)
+            try:
+                conf = float(row.get('confidence') or 0)
+            except ValueError:
+                conf = 0.0
+            video = row.get('video_file') or ''
+            if row.get('source_type') == 'video' and video:
+                e = by_key.get(('v', video))
+                if e is None:
+                    e = by_key[('v', video)] = {'kind': 'video', 'video': video, 'frames': {}}
+                    entries.append(e)
+                fr = e['frames'].setdefault(fn, {'file': fn, 'species': set(), 'conf': 0.0,
+                                                 'frame': row.get('frame_number') or '',
+                                                 'ts': row.get('timestamp_seconds') or ''})
+                fr['conf'] = max(fr['conf'], conf)
+            else:
+                e = by_key.get(('i', fn))
+                if e is None:
+                    e = by_key[('i', fn)] = {'kind': 'image', 'file': fn, 'species': set()}
+                    entries.append(e)
+                fr = e
+            if sp:
+                fr['species'].add(sp)
+    return entries, all_species
+
+
+def _annotated_image(ann, rel):
+    """Path (relative to ann) of an annotated image saved as .jpg or .png, or None."""
+    stem = Path(rel)
+    for suffix in ('.jpg', '.png'):
+        candidate = ann / stem.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @app.route('/gallery/<job_id>')
 def gallery(job_id):
     base, ann = _safe_run_path(job_id, 'annotated')
     species_filter = request.args.get('species', '').strip()
+    video_filter = request.args.get('video', '').strip()
+    entries, all_species = _gallery_index(base / 'detections.csv')
 
-    # Driven by detections.csv rather than walking the annotated folder: for
-    # a large run that folder can hold thousands of images, and an unfiltered
-    # directory walk pays for all of them every time regardless of how many
-    # are actually shown. The CSV already has filename -> species for every
-    # detection, so it doubles as the species-filter index for free, and is
-    # typically far smaller than the full image count (no detection = no row).
-    filename_species = {}  # relname -> set of species seen in that file
-    order = []  # relnames in first-seen (= processing) order
-    all_species = set()
-    csv_path = base / 'detections.csv'
-    if csv_path.is_file():
-        with open(csv_path, newline='', encoding='utf-8') as f:
-            for row in csv.DictReader(f):
-                fn = row.get('filename') or ''
-                if not fn:
-                    continue
-                sp = row.get('species') or ''
-                if fn not in filename_species:
-                    filename_species[fn] = set()
-                    order.append(fn)
-                if sp:
-                    filename_species[fn].add(sp)
-                    all_species.add(sp)
+    def wanted(species):
+        return not species_filter or species_filter in species
 
-    relnames = [fn for fn in order if not species_filter or species_filter in filename_species[fn]]
-
-    imgs = []
-    for fn in relnames:
-        stem_path = Path(fn)
-        for suffix in ('.jpg', '.png'):
-            candidate = ann / stem_path.with_suffix(suffix)
-            if candidate.is_file():
-                imgs.append(str(candidate.relative_to(base)))
+    items = []  # dicts for the template: path (relative to the run), title, detail, species, video?
+    if video_filter:
+        # One video: every annotated frame, in frame order.
+        entry = next((e for e in entries if e['kind'] == 'video' and e['video'] == video_filter), None)
+        frames = list(entry['frames'].values()) if entry else []
+        # Offer only the species that appear in this video.
+        all_species = set().union(*(fr['species'] for fr in frames)) if frames else set()
+        folder = ann / Path(video_filter).stem
+        for fr in frames:
+            if not wanted(fr['species']):
+                continue
+            p = _annotated_image(folder, fr['file'])
+            if p is None:
+                continue
+            items.append({'path': p.relative_to(base).as_posix(), 'kind': 'frame',
+                          'title': f"Frame {fr['frame']}",
+                          'detail': f"{fr['ts']} s" if fr['ts'] != '' else '',
+                          'species': sorted(fr['species'])})
+            if len(items) >= GALLERY_LIMIT:
                 break
-        if len(imgs) >= 300:
-            break
+    else:
+        for e in entries:
+            if e['kind'] == 'image':
+                if not wanted(e['species']):
+                    continue
+                p = _annotated_image(ann, e['file'])
+                if p is None:
+                    continue
+                items.append({'path': p.relative_to(base).as_posix(), 'kind': 'image',
+                              'title': e['file'], 'detail': '', 'species': sorted(e['species'])})
+            else:
+                # One card per video, showing its most confident matching frame.
+                frames = [fr for fr in e['frames'].values() if wanted(fr['species'])]
+                if not frames:
+                    continue
+                folder = ann / Path(e['video']).stem
+                best = None
+                for fr in sorted(frames, key=lambda fr: -fr['conf']):
+                    best = _annotated_image(folder, fr['file'])
+                    if best is not None:
+                        break
+                if best is None:
+                    continue
+                species = sorted(set().union(*(fr['species'] for fr in frames)))
+                items.append({'path': best.relative_to(base).as_posix(), 'kind': 'video',
+                              'title': e['video'], 'video': e['video'],
+                              'detail': f"{len(frames)} frame{'s' if len(frames) != 1 else ''} with detections",
+                              'species': species})
+            if len(items) >= GALLERY_LIMIT:
+                break
 
     return render_template('gallery.html', **context(need_scan=False), job_id=job_id,
-                           images=imgs, all_species=sorted(all_species),
-                           species_filter=species_filter)
+                           items=items, all_species=sorted(all_species),
+                           species_filter=species_filter, video_filter=video_filter,
+                           limit=GALLERY_LIMIT)
 
 
 @app.route('/runs/<job_id>/file/<path:rel>')
