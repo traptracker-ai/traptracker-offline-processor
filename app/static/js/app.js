@@ -89,19 +89,12 @@ function copyToggle(){
   const box = document.getElementById('copy_matches');
   const opts = document.getElementById('copy_options');
   if(!box || !opts) return;
-  const matches = document.getElementById('annotate_matches');
-  const apply = () => {
-    opts.hidden = !box.checked;
-    if(box.checked) loadSpecies();
-    // "Only the chosen species" annotated output needs copying switched on.
-    if(matches){
-      matches.disabled = !box.checked;
-      if(!box.checked && matches.checked) document.querySelector('input[name="annotate"][value="all"]').checked = true;
-    }
-  };
+  const apply = () => { opts.hidden = !box.checked; };
   box.addEventListener('change', apply);
+  // The species list is always visible, so load it now and on model changes.
   document.querySelectorAll('input[name="pipeline"], select[name="model"], select[name="two_stage_model"]')
-    .forEach(el => el.addEventListener('change', () => { if(box.checked) loadSpecies(); }));
+    .forEach(el => el.addEventListener('change', loadSpecies));
+  loadSpecies();
   document.getElementById('species_list')?.addEventListener('change', speciesSummary);
   apply();
 }

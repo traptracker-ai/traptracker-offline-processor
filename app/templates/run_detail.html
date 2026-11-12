@@ -14,11 +14,12 @@
     <div class="metric"><label>Failed</label><strong id="failed">{{ job.failed|default(0) }}</strong></div>
     {% if copying %}<div class="metric"><label>Files copied</label><strong id="copied">{{ job.copied|default(0) }}</strong><span>to <code>output/{{ job.config.copy_folder }}</code></span></div>{% endif %}
   </section>
-  {% if copying %}<dl class="facts">
-    <div><dt>Species copied</dt><dd>{{ job.config.copy_species|join(', ') if job.config.copy_species else 'Any detection' }}</dd></div>
+  {% if job.config %}<dl class="facts">
+    <div><dt>Annotated output</dt><dd>{{ {'all': 'All detections', 'matches': 'Species of interest only', 'none': 'None'}[annotate] }}</dd></div>
+    {% if copying or annotate == 'matches' %}<div><dt>Species of interest</dt><dd>{{ job.config.copy_species|join(', ') if job.config.copy_species else 'Any detection' }}</dd></div>
     <div><dt>Min. confidence</dt><dd>{{ job.config.copy_min_conf }}</dd></div>
-    <div><dt>Min. frames</dt><dd>{{ job.config.copy_min_frames }}</dd></div>
-    <div><dt>Photos too</dt><dd>{{ 'Yes' if job.config.copy_images else 'No' }}</dd></div>
+    <div><dt>Min. frames</dt><dd>{{ job.config.copy_min_frames }}</dd></div>{% endif %}
+    {% if copying %}<div><dt>Photos copied too</dt><dd>{{ 'Yes' if job.config.copy_images else 'No' }}</dd></div>{% endif %}
   </dl>{% endif %}
   <div class="actions">
     {% if job.status in ('queued', 'loading', 'running', 'stopping') %}<form method="post" action="/runs/{{ job_id }}/stop" id="stop-form"><button class="btn danger" type="submit" id="stop-btn"{% if job.status == 'stopping' %} disabled{% endif %}>{{ 'Stopping…' if job.status == 'stopping' else 'Stop run' }}</button></form>{% endif %}

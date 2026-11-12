@@ -152,14 +152,12 @@ ANNOTATE_MODES = ('all', 'matches', 'none')
 
 
 def annotate_mode(config):
-    """Which annotated output a run config asks for: 'all', 'matches' or 'none'.
-    'matches' needs copying switched on (it uses the copy species and rules),
-    otherwise it means 'all'."""
+    """Which annotated output a run config asks for: 'all', 'matches' (files
+    with a species of interest, by copy_species / copy_min_conf /
+    copy_min_frames) or 'none'."""
     mode = config.get('annotate')
     if mode not in ANNOTATE_MODES:
         mode = 'all' if config.get('save_annotated', True) else 'none'
-    if mode == 'matches' and not config.get('copy_matches'):
-        mode = 'all'
     return mode
 
 

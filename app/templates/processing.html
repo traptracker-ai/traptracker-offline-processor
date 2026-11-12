@@ -30,24 +30,29 @@
 </div>
 
 <div class="form-section">
+<h3>Species of interest <span class="optional">optional</span></h3>
+<p class="muted section-note">Used by "Only the species of interest" and "Copy videos" below. Detection itself always finds every species the model knows.</p>
+<div class="field"><span class="field-label">Species</span>
+<details class="multi" id="species_picker"><summary>Any detection</summary><div class="multi-list" id="species_list"><p class="muted">Loading the model's species…</p></div></details>
+<small class="muted">From the selected model's class list. Choose none to mean any detection, including people and vehicles.</small></div>
+<div class="form-grid">
+<label>Min. confidence<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count as a match.</small></label>
+<label>Min. frames per video<input type="number" name="copy_min_frames" min="1" value="1"><small>Frames (after stride) that must contain the species. Raise it to ignore one-off detections.</small></label>
+</div>
+</div>
+
+<div class="form-section">
 <h3>Outputs</h3>
 <fieldset class="choice"><legend>Annotated images and video frames</legend>
 <p class="muted choice-note">Copies with boxes drawn, saved in the run folder. The Annotated Gallery shows only these. They don't affect the CSV or the copied videos.</p>
 <label class="check"><input type="radio" name="annotate" value="all" checked> <span>All detections<small>Every image and video frame with a detection (up to 2,000 frames per video). Uses the most disk space.</small></span></label>
-<label class="check"><input type="radio" name="annotate" value="matches" id="annotate_matches" disabled> <span>Only the chosen species<small>Only images and frames containing a species chosen under "Copy videos" below, using the same confidence and frame rules. Needs copying switched on.</small></span></label>
+<label class="check"><input type="radio" name="annotate" value="matches"> <span>Only the species of interest<small>Only images and frames that match the species chosen above.</small></span></label>
 <label class="check"><input type="radio" name="annotate" value="none"> <span>None<small>Nothing is saved and the gallery stays empty. Uses the least disk space.</small></span></label>
 </fieldset>
-<label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code> as soon as it is processed, keeping its sub-folder path. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
+<label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain the species of interest<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code> as soon as it is processed, keeping its sub-folder path. A video with two chosen species goes into both folders. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
 <div id="copy_options" class="sub-options" hidden>
-<div class="field"><span class="field-label">Species to copy</span>
-<details class="multi" id="species_picker"><summary>Any detection</summary><div class="multi-list" id="species_list"><p class="muted">Loading the model's species…</p></div></details>
-<small class="muted">From the selected model's class list. A video with two chosen species is copied into both folders. Choose none to copy every video with any detection, including people and vehicles.</small></div>
-<div class="form-grid three">
-<label>Output folder<input type="text" name="copy_folder" value="matched-videos"><small>Inside the <code>output</code> folder.</small></label>
-<label>Min. confidence<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count.</small></label>
-<label>Min. frames<input type="number" name="copy_min_frames" min="1" value="1"><small>Frames (after stride) with the species.</small></label>
-</div>
-<label class="check"><input type="checkbox" name="copy_images"> <span>Also copy matching photos<small>Copies still images from the input folder that contain a chosen species. Video frames are never copied here.</small></span></label>
+<label>Output folder<input type="text" name="copy_folder" value="matched-videos"><small>Created inside the <code>output</code> folder.</small></label>
+<label class="check"><input type="checkbox" name="copy_images"> <span>Also copy matching photos<small>Copies still images from the input folder that match. Video frames are never copied here.</small></span></label>
 </div>
 </div>
 

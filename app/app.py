@@ -222,25 +222,25 @@ def processing():
 
         # Optional copying of matching videos into OUTPUT_DIR/<folder>. The
         # folder is reduced to one safe name so it can't escape OUTPUT_DIR.
-        copy_matches = request.form.get('copy_matches') == 'on'
-        copy_config = {'copy_matches': False}
-        if copy_matches:
+        # Species of interest (and their match rules) are used both for
+        # copying and for "only the species of interest" annotated output. The
+        # config keys keep their copy_ names so older runs still resume.
+        copy_config = {
+            'copy_species': list(dict.fromkeys(s.strip() for s in request.form.getlist('copy_species') if s.strip())),
+            'copy_min_conf': _num('copy_min_conf', 0.5, float, 0.0, 1.0),
+            'copy_min_frames': _num('copy_min_frames', 1, int, 1),
+            'copy_matches': request.form.get('copy_matches') == 'on',
+        }
+        if copy_config['copy_matches']:
             folder = secure_filename(request.form.get('copy_folder', '').strip()) or 'matched-videos'
-            species = list(dict.fromkeys(s.strip() for s in request.form.getlist('copy_species') if s.strip()))
-            copy_config = {
-                'copy_matches': True,
+            copy_config.update({
                 'copy_folder': folder,
                 'copy_dir': str(OUTPUT_DIR / folder),
-                'copy_species': species,
-                'copy_min_conf': _num('copy_min_conf', 0.5, float, 0.0, 1.0),
-                'copy_min_frames': _num('copy_min_frames', 1, int, 1),
                 'copy_images': request.form.get('copy_images') == 'on',
-            }
+            })
 
         annotate = request.form.get('annotate', 'all')
         if annotate not in ANNOTATE_MODES:
-            annotate = 'all'
-        if annotate == 'matches' and not copy_config['copy_matches']:
             annotate = 'all'
 
         config = {
@@ -274,7 +274,9 @@ def runs():
 @app.route('/runs/<job_id>')
 def run_detail(job_id):
     job = _load_status(job_id)
-    return render_template('run_detail.html', **context(need_scan=False), job=job or None, job_id=job_id)
+    cfg = (job or {}).get('config')
+    return render_template('run_detail.html', **context(need_scan=False), job=job or None, job_id=job_id,
+                           annotate=annotate_mode(cfg if isinstance(cfg, dict) else {}))
 
 
 @app.route('/api/jobs/<job_id>')
