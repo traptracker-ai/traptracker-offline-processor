@@ -40,15 +40,20 @@ function pollJob(){
         set('total', j.total || 0);
         set('detections', j.detections || 0);
         set('failed', j.failed || 0);
+        set('copied', j.copied || 0);
         const bar = document.getElementById('bar');
         if(bar) bar.style.width = (j.progress || 0) + '%';
         renderSummary(j.summary);
-        // Keep polling through 'finalizing'. Stop on terminal states.
-        if(!['complete','error'].includes(j.status)){
+        const stopBtn = document.getElementById('stop-btn');
+        if(stopBtn && j.status === 'stopping'){ stopBtn.disabled = true; stopBtn.textContent = 'Stopping…'; }
+        // Keep polling through 'finalizing' and 'stopping'. Stop on terminal states.
+        const terminal = ['complete','error','stopped'];
+        if(!terminal.includes(j.status)){
           setTimeout(tick, 1500);
-        } else if(j.status === 'error' && initialStatus !== 'error'){
-          // The job errored while we watched. Reload once so the server renders
-          // the Resume button. If the page already loaded errored, do nothing.
+        } else if(!terminal.includes(initialStatus)){
+          // The job ended while we watched. Reload once so the server renders
+          // the right buttons (Resume, no Stop). If the page already loaded
+          // in a terminal state, do nothing (that would loop).
           setTimeout(() => location.reload(), 800);
         }
       } else {
@@ -76,4 +81,62 @@ function pipelineToggle(){
   }
   radios.forEach(r => r.addEventListener('change', apply));
   apply();
+}
+
+// Processing page: show the copy options only when copying is switched on,
+// and fill the species dropdown from the selected model's class list.
+function copyToggle(){
+  const box = document.getElementById('copy_matches');
+  const opts = document.getElementById('copy_options');
+  if(!box || !opts) return;
+  const apply = () => { opts.hidden = !box.checked; };
+  box.addEventListener('change', apply);
+  // The species list is always visible, so load it now and on model changes.
+  document.querySelectorAll('input[name="pipeline"], select[name="model"], select[name="two_stage_model"]')
+    .forEach(el => el.addEventListener('change', loadSpecies));
+  loadSpecies();
+  document.getElementById('species_list')?.addEventListener('change', speciesSummary);
+  apply();
+}
+
+let speciesKey = null;
+async function loadSpecies(){
+  const list = document.getElementById('species_list');
+  if(!list) return;
+  const pipeline = document.querySelector('input[name="pipeline"]:checked')?.value || 'single_stage';
+  const params = new URLSearchParams({pipeline});
+  const sel = document.querySelector(pipeline === 'two_stage' ? 'select[name="two_stage_model"]' : 'select[name="model"]');
+  params.set(pipeline === 'two_stage' ? 'two_stage_model' : 'model', sel ? sel.value : '');
+  const key = params.toString();
+  if(key === speciesKey) return;  // already showing this model's species
+  speciesKey = key;
+  const msg = text => { const p = document.createElement('p'); p.className = 'muted'; p.textContent = text; list.replaceChildren(p); };
+  msg("Loading the model's species…");
+  speciesSummary();
+  try{
+    const r = await fetch('/api/model-species?' + key);
+    const j = await r.json();
+    if(key !== speciesKey) return;  // the model was changed again meanwhile
+    if(!r.ok || j.error){ speciesKey = null; msg(j.error || 'Could not read the class list.'); return; }
+    if(!j.species.length){ msg('This model has no class names, so species cannot be chosen.'); return; }
+    list.replaceChildren(...j.species.map(sp => {
+      const label = document.createElement('label');
+      label.className = 'check';
+      const input = document.createElement('input');
+      input.type = 'checkbox'; input.name = 'copy_species'; input.value = sp;
+      label.append(input, ' ' + sp);
+      return label;
+    }));
+  }catch(e){
+    speciesKey = null;
+    msg('Could not read the class list.');
+  }
+  speciesSummary();
+}
+
+function speciesSummary(){
+  const summary = document.querySelector('#species_picker summary');
+  if(!summary) return;
+  const chosen = [...document.querySelectorAll('#species_list input:checked')].map(i => i.value);
+  summary.textContent = chosen.length ? chosen.join(', ') : 'Any detection';
 }

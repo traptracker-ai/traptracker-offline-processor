@@ -27,6 +27,7 @@ Commercial use requires prior written permission. See [`COMMERCIAL_USE.md`](COMM
 - Server-side input folder scanning for large batches
 - Confidence and IoU threshold configuration
 - Frame extraction for videos
+- Copy videos containing chosen species to `output/<folder>/<species>/` during a run, to filter large surveys down to the clips of interest
 - Optional annotated outputs
 - CSV exports
 - Failed-file reports
