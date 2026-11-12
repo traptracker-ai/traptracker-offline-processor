@@ -31,7 +31,12 @@
 
 <div class="form-section">
 <h3>Outputs</h3>
-<label class="check"><input type="checkbox" name="save_annotated" checked> <span>Save annotated images and video frames<small>Copies with boxes drawn, saved in the run folder for the Annotated Gallery (up to 2,000 frames per video). Untick to save disk space; the CSV and video copies are not affected.</small></span></label>
+<fieldset class="choice"><legend>Annotated images and video frames</legend>
+<p class="muted choice-note">Copies with boxes drawn, saved in the run folder. The Annotated Gallery shows only these. They don't affect the CSV or the copied videos.</p>
+<label class="check"><input type="radio" name="annotate" value="all" checked> <span>All detections<small>Every image and video frame with a detection (up to 2,000 frames per video). Uses the most disk space.</small></span></label>
+<label class="check"><input type="radio" name="annotate" value="matches" id="annotate_matches" disabled> <span>Only the chosen species<small>Only images and frames containing a species chosen under "Copy videos" below, using the same confidence and frame rules. Needs copying switched on.</small></span></label>
+<label class="check"><input type="radio" name="annotate" value="none"> <span>None<small>Nothing is saved and the gallery stays empty. Uses the least disk space.</small></span></label>
+</fieldset>
 <label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code> as soon as it is processed, keeping its sub-folder path. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
 <div id="copy_options" class="sub-options" hidden>
 <div class="field"><span class="field-label">Species to copy</span>

@@ -5,7 +5,7 @@ from werkzeug.utils import secure_filename
 from detector import available_providers, species_labels, IMAGE_EXTS, VIDEO_EXTS
 from utils import (scan_inputs, scan_inputs_cached, invalidate_scan_cache, start_scan_refresher,
                    list_models, list_two_stage_pipelines, human_bytes, safe_copy_upload)
-from job_runner import start_job, get_job, list_jobs, request_stop
+from job_runner import start_job, get_job, list_jobs, request_stop, annotate_mode, ANNOTATE_MODES
 
 BASE = Path(__file__).resolve().parent.parent
 MODEL_DIR = Path(os.environ.get('MODEL_DIR', BASE / 'models'))
@@ -237,6 +237,12 @@ def processing():
                 'copy_images': request.form.get('copy_images') == 'on',
             }
 
+        annotate = request.form.get('annotate', 'all')
+        if annotate not in ANNOTATE_MODES:
+            annotate = 'all'
+        if annotate == 'matches' and not copy_config['copy_matches']:
+            annotate = 'all'
+
         config = {
             **model_config,
             **copy_config,
@@ -249,7 +255,10 @@ def processing():
             'input_size': _num('input_size', 0, int, 0, 4096),
             'batch_size': _num('batch_size', 16, int, 1, 256),
             'frame_stride': _num('frame_stride', 1, int, 1),
-            'save_annotated': request.form.get('save_annotated') == 'on',
+            # 'all', 'matches' (only files with the chosen copy species) or 'none'.
+            # save_annotated is kept for anything reading older-style configs.
+            'annotate': annotate,
+            'save_annotated': annotate != 'none',
             'providers': os.environ.get('ORT_PROVIDERS', 'CUDAExecutionProvider,CPUExecutionProvider'),
         }
         job_id = start_job(config)
@@ -467,7 +476,10 @@ def gallery(job_id):
             if len(items) >= GALLERY_LIMIT:
                 break
 
+    cfg = (_load_status(job_id) or {}).get('config')
+    cfg = cfg if isinstance(cfg, dict) else {}
     return render_template('gallery.html', **context(need_scan=False), job_id=job_id,
+                           annotate=annotate_mode(cfg), copy_folder=cfg.get('copy_folder', ''),
                            items=items, all_species=sorted(all_species),
                            species_filter=species_filter, video_filter=video_filter,
                            limit=GALLERY_LIMIT)

@@ -25,5 +25,5 @@
       {% if it.species %}<div class="tags">{% for s in it.species %}<span class="tag">{{ s }}</span>{% endfor %}</div>{% endif %}
     </div>
   </a>
-{% else %}<div class="card empty-card">{% if species_filter %}No annotated images or video frames found for "{{ species_filter }}".{% else %}No annotated images or video frames found. Annotated output is only saved when "Save annotated images" is ticked for the run.{% endif %}</div>{% endfor %}</section>
+{% else %}<div class="card empty-card">{% if annotate == 'none' %}<b>This run didn't save any annotated images or video frames</b>, so there is nothing to show here. "Annotated images and video frames" was set to <i>None</i>. Choose <i>All detections</i> or <i>Only the chosen species</i> on a new run to fill the gallery.{% if copy_folder %} Matching originals were still copied to <code>output/{{ copy_folder }}</code>.{% endif %}{% elif species_filter %}No annotated images or video frames found for "{{ species_filter }}".{% if annotate == 'matches' %} This run only saved frames for the species chosen for copying.{% endif %}{% elif annotate == 'matches' %}No images or frames contained the chosen species, so nothing was saved.{% else %}No annotated images or video frames found.{% endif %}</div>{% endfor %}</section>
 {% endblock %}

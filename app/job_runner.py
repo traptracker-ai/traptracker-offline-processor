@@ -148,6 +148,21 @@ def _load_copied(match_path):
     return copied
 
 
+ANNOTATE_MODES = ('all', 'matches', 'none')
+
+
+def annotate_mode(config):
+    """Which annotated output a run config asks for: 'all', 'matches' or 'none'.
+    'matches' needs copying switched on (it uses the copy species and rules),
+    otherwise it means 'all'."""
+    mode = config.get('annotate')
+    if mode not in ANNOTATE_MODES:
+        mode = 'all' if config.get('save_annotated', True) else 'none'
+    if mode == 'matches' and not config.get('copy_matches'):
+        mode = 'all'
+    return mode
+
+
 def _load_manifest(run_dir):
     """Return the set of source paths already fully processed in a prior attempt."""
     done = set()
@@ -229,11 +244,14 @@ def _safe_rel(path, root):
         return path.name
 
 
-def _process_image_batch(detector, items, run_dir, save_annotated):
+def _process_image_batch(detector, items, run_dir, annotate_if):
     """Run a batch of (path, relname) images through the detector in ONE
     inference call instead of one call per image (see
     detector.YOLOONNX.detect_batch for why this matters at scale), then do
     the same per-image EXIF/annotate/write work a single-image path would.
+
+    `annotate_if(dets)` decides whether an image's annotated copy is saved
+    (None = never).
 
     Returns a list of (path, relname, dets, error) in the same order as
     `items`, so the caller can record each one exactly as it would a
@@ -267,7 +285,7 @@ def _process_image_batch(detector, items, run_dir, save_annotated):
                 d['source_type'] = 'image'
                 d['datetime_original'] = dt
                 d['source_path'] = str(path)
-            if save_annotated and dets:
+            if annotate_if is not None and dets and annotate_if(dets):
                 ann = detector.annotate(img, dets)
                 out = Path(run_dir) / 'annotated' / relname
                 out.parent.mkdir(parents=True, exist_ok=True)
@@ -279,7 +297,7 @@ def _process_image_batch(detector, items, run_dir, save_annotated):
     return results
 
 
-def _process_video(detector, path, relname, run_dir, save_annotated, frame_stride, max_annotated=2000,
+def _process_video(detector, path, relname, run_dir, annotate_if, frame_stride, max_annotated=2000,
                    stop_event=None):
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -287,6 +305,7 @@ def _process_video(detector, path, relname, run_dir, save_annotated, frame_strid
     rows = []
     frame_i = 0
     annotated_count = 0
+    written = []  # annotated frame files, so a caller can discard them
     fps = cap.get(cv2.CAP_PROP_FPS) or 0
     stem = Path(relname).stem
     try:
@@ -310,17 +329,18 @@ def _process_video(detector, path, relname, run_dir, save_annotated, frame_strid
                 d['frame_number'] = frame_i
                 d['timestamp_seconds'] = round(ts, 3)
                 d['source_path'] = str(path)
-            if save_annotated and dets and annotated_count < max_annotated:
+            if annotate_if is not None and dets and annotated_count < max_annotated and annotate_if(dets):
                 ann = detector.annotate(frame, dets)
                 out = Path(run_dir) / 'annotated' / stem / name
                 out.parent.mkdir(parents=True, exist_ok=True)
-                cv2.imwrite(str(out), ann)
+                if cv2.imwrite(str(out), ann):
+                    written.append(out)
                 annotated_count += 1
             rows.extend(dets)
             frame_i += 1
     finally:
         cap.release()
-    return rows
+    return rows, written
 
 
 def _run(job_id, config):
@@ -365,7 +385,6 @@ def _run(job_id, config):
 
         root = Path(config.get('input_root') or '/')
         frame_stride = int(config.get('frame_stride', 1))
-        save_annotated = config.get('save_annotated', True)
         # Images are processed in batches through the detector (one inference
         # call per batch instead of one per image -- see detector.detect_batch);
         # videos are still handled frame-by-frame, unchanged. 16 is a
@@ -398,6 +417,16 @@ def _run(job_id, config):
         copy_species = {s.lower() for s in config.get('copy_species') or []}
         copy_min_conf = float(config.get('copy_min_conf', 0.5))
         copy_min_frames = max(1, int(config.get('copy_min_frames', 1)))
+
+        # Annotated output: 'all' detections, only 'matches' (files with a
+        # chosen species, by the copy rules), or 'none'. Runs from before this
+        # setting only have the save_annotated flag.
+        annotate = annotate_mode(config)
+
+        def _has_match(dets):
+            return bool(_match_species(dets, copy_species, copy_min_conf))
+
+        annotate_if = {'all': lambda dets: True, 'matches': _has_match}.get(annotate)
         copy_images = bool(config.get('copy_images'))
         copied_paths = _load_copied(match_path) if copy_dir else set()
         match_f = match_writer = None
@@ -487,7 +516,7 @@ def _run(job_id, config):
                 if ext in IMAGE_EXTS:
                     image_batch.append((path, _safe_rel(path, root)))
                     if len(image_batch) >= batch_size:
-                        for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, save_annotated):
+                        for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, annotate_if):
                             _record(p, relname, dets, error)
                         image_batch = []
                         csv_f.flush()
@@ -496,7 +525,7 @@ def _run(job_id, config):
 
                 # A non-image file ends the current run of batched images.
                 if image_batch:
-                    for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, save_annotated):
+                    for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, annotate_if):
                         _record(p, relname, dets, error)
                     image_batch = []
                     csv_f.flush()
@@ -506,8 +535,19 @@ def _run(job_id, config):
                     relname = _safe_rel(path, root)
                     file_dets, error = [], None
                     try:
-                        file_dets = _process_video(detector, path, relname, run_dir, save_annotated,
-                                                   frame_stride, stop_event=stop_event)
+                        file_dets, written = _process_video(detector, path, relname, run_dir, annotate_if,
+                                                            frame_stride, stop_event=stop_event)
+                        if annotate == 'matches' and written and not any(
+                                hits >= copy_min_frames
+                                for hits, _ in _match_species(file_dets, copy_species, copy_min_conf).values()):
+                            # Had some matching frames, but too few to count as
+                            # a match: keep the gallery to real matches only.
+                            for f in written:
+                                f.unlink(missing_ok=True)
+                            try:
+                                written[0].parent.rmdir()  # only if now empty
+                            except OSError:
+                                pass
                     except _Stopped:
                         stopped = True
                         break
@@ -518,7 +558,7 @@ def _run(job_id, config):
                     manifest_f.flush()
 
             if image_batch:
-                for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, save_annotated):
+                for p, relname, dets, error in _process_image_batch(detector, image_batch, run_dir, annotate_if):
                     _record(p, relname, dets, error)
         finally:
             csv_f.flush()

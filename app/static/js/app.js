@@ -89,7 +89,16 @@ function copyToggle(){
   const box = document.getElementById('copy_matches');
   const opts = document.getElementById('copy_options');
   if(!box || !opts) return;
-  const apply = () => { opts.hidden = !box.checked; if(box.checked) loadSpecies(); };
+  const matches = document.getElementById('annotate_matches');
+  const apply = () => {
+    opts.hidden = !box.checked;
+    if(box.checked) loadSpecies();
+    // "Only the chosen species" annotated output needs copying switched on.
+    if(matches){
+      matches.disabled = !box.checked;
+      if(!box.checked && matches.checked) document.querySelector('input[name="annotate"][value="all"]').checked = true;
+    }
+  };
   box.addEventListener('change', apply);
   document.querySelectorAll('input[name="pipeline"], select[name="model"], select[name="two_stage_model"]')
     .forEach(el => el.addEventListener('change', () => { if(box.checked) loadSpecies(); }));
