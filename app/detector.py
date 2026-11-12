@@ -573,3 +573,24 @@ def build_detector(config, providers=None):
         input_size=config.get('input_size'), conf=config.get('conf', 0.25),
         iou=config.get('iou', 0.45),
     )
+
+
+def species_labels(config):
+    """Every label a run with this model config can write to the `species`
+    column, in model order. Used for the species picker on the Processing page.
+
+    The models are loaded exactly as a run would load them (on CPU only), so the
+    list goes through the same class-file checks and fails the same way. For a
+    two-stage model it is the classifier's labels plus any detector classes
+    whose boxes keep their detector label (e.g. person, vehicle).
+    """
+    cpu = ['CPUExecutionProvider']
+    if config.get('pipeline') == 'two_stage':
+        det = TwoStageDetector(config['model_path'], config['classifier_path'],
+                               config.get('classifier_classes_path', ''), providers=cpu)
+        labels = list(det.classifier.classes)
+        if det.classify_ids is not None:
+            labels += [c for i, c in enumerate(det.detector.classes) if i not in det.classify_ids]
+    else:
+        labels = list(YOLOONNX(config['model_path'], config.get('classes_path', ''), providers=cpu).classes)
+    return list(dict.fromkeys(str(l) for l in labels if str(l).strip()))

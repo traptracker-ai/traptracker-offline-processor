@@ -7,6 +7,24 @@ from utils import exif_datetime
 
 JOBS = {}
 LOCK = threading.Lock()
+# job_id -> threading.Event, set to ask that job's worker thread to stop.
+STOP_EVENTS = {}
+
+
+class _Stopped(Exception):
+    """Raised inside a file's processing when the user stops the run."""
+
+
+def request_stop(job_id):
+    """Ask a running job to stop after the file it is on. Returns False if no
+    worker for this job is alive in this process (e.g. after a restart)."""
+    with LOCK:
+        ev = STOP_EVENTS.get(job_id)
+    if ev is None:
+        return False
+    ev.set()
+    _set(job_id, status='stopping', message='Stopping after the current file')
+    return True
 
 # Keys that are large or noisy and should not be persisted into status.json.
 _HEAVY_KEYS = {'error'}
@@ -197,6 +215,8 @@ def start_job(config, resume_job_id=None):
          run_dir=str(run_dir), started=time.strftime('%Y-%m-%d %H:%M:%S'),
          config=_slim_config(config), processed=0, detections=0, failed=0,
          total=len(config.get('files', [])), resumed=bool(resume_job_id))
+    with LOCK:
+        STOP_EVENTS[job_id] = threading.Event()
     t = threading.Thread(target=_run, args=(job_id, config), daemon=True)
     t.start()
     return job_id
@@ -259,7 +279,8 @@ def _process_image_batch(detector, items, run_dir, save_annotated):
     return results
 
 
-def _process_video(detector, path, relname, run_dir, save_annotated, frame_stride, max_annotated=2000):
+def _process_video(detector, path, relname, run_dir, save_annotated, frame_stride, max_annotated=2000,
+                   stop_event=None):
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise ValueError('OpenCV could not open video')
@@ -270,6 +291,10 @@ def _process_video(detector, path, relname, run_dir, save_annotated, frame_strid
     stem = Path(relname).stem
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                # Leave a long video unfinished rather than block the stop;
+                # it isn't written to the manifest, so resume redoes it.
+                raise _Stopped()
             ok, frame = cap.read()
             if not ok:
                 break
@@ -304,6 +329,9 @@ def _run(job_id, config):
     fail_path = run_dir / 'failed_files.csv'
     manifest_path = run_dir / 'manifest.jsonl'
     match_path = run_dir / 'matched_files.csv'
+    with LOCK:
+        stop_event = STOP_EVENTS.setdefault(job_id, threading.Event())
+    stopped = False
 
     try:
         two_stage = config.get('pipeline') == 'two_stage'
@@ -311,6 +339,8 @@ def _run(job_id, config):
              message='Loading detector and classifier models' if two_stage else 'Loading ONNX model')
         providers = [p.strip() for p in config.get('providers', 'CUDAExecutionProvider,CPUExecutionProvider').split(',') if p.strip()]
         detector = build_detector(config, providers=providers)
+        if stop_event.is_set():
+            raise _Stopped()
 
         all_files = [Path(p) for p in config['files']]
         total = len(all_files)
@@ -327,7 +357,7 @@ def _run(job_id, config):
 
         gpu_note = '' if detector.on_gpu else ' (running on CPU — see warnings)'
         resume_note = f' (resuming — {processed} already done)' if done_paths else ''
-        _set(job_id, status='running',
+        _set(job_id, status='stopping' if stop_event.is_set() else 'running',
              message=f'Processing {total} files{gpu_note}{resume_note}',
              providers=detector.providers, on_gpu=detector.on_gpu,
              warnings=getattr(detector, 'warnings', []), total=total,
@@ -443,6 +473,12 @@ def _run(job_id, config):
         try:
             image_batch = []  # list of (path, relname) awaiting a batched detector call
             for path in all_files:
+                if stop_event.is_set():
+                    # Unprocessed files (including any images waiting in
+                    # image_batch) stay out of the manifest; resume picks them up.
+                    stopped = True
+                    image_batch = []
+                    break
                 spath = str(path)
                 if spath in done_paths:
                     continue
@@ -470,7 +506,11 @@ def _run(job_id, config):
                     relname = _safe_rel(path, root)
                     file_dets, error = [], None
                     try:
-                        file_dets = _process_video(detector, path, relname, run_dir, save_annotated, frame_stride)
+                        file_dets = _process_video(detector, path, relname, run_dir, save_annotated,
+                                                   frame_stride, stop_event=stop_event)
+                    except _Stopped:
+                        stopped = True
+                        break
                     except Exception as e:
                         error = str(e)
                     _record(path, relname, file_dets, error)
@@ -491,8 +531,8 @@ def _run(job_id, config):
         # Finalization phase — make it visible. The CSV is already written, so this
         # is just the failed-files report and a status flip. ZIP is built lazily on
         # download, not here, so completion is near-instant even for huge runs.
-        _set(job_id, status='finalizing', progress=100,
-             message='Finalizing results (writing reports)')
+        _set(job_id, status='finalizing', message='Finalizing results (writing reports)',
+             **({} if stopped else {'progress': 100}))
 
         # Rewrite the failed-files CSV from the manifest (authoritative record).
         try:
@@ -510,11 +550,20 @@ def _run(job_id, config):
             pass
 
         summary = [{'species': s, 'count': c} for s, c in counter.most_common(50)]
-        _set(job_id, status='complete', progress=100, message='Complete',
+        if stopped:
+            done = dict(status='stopped', message=f'Stopped by user after {processed}/{total} files. Resume to continue.',
+                        progress=int(processed / total * 100) if total else 0)
+        else:
+            done = dict(status='complete', progress=100, message='Complete')
+        _set(job_id, **done,
              detections=detections, failed=failures_count, copied=len(copied_paths),
              csv=str(csv_path), failed_csv=str(fail_path),
              matched_csv=str(match_path) if copy_dir else '',
              summary=summary, completed=time.strftime('%Y-%m-%d %H:%M:%S'))
+    except _Stopped:
+        # Stopped before any file was processed (e.g. while the model loaded).
+        _set(job_id, status='stopped', message='Stopped by user before processing started. Resume to continue.',
+             completed=time.strftime('%Y-%m-%d %H:%M:%S'))
     except Exception as e:
         try:
             (run_dir / 'error.txt').write_text(traceback.format_exc(), encoding='utf-8')
@@ -522,3 +571,9 @@ def _run(job_id, config):
             pass
         _set(job_id, status='error', message=str(e), error=traceback.format_exc(),
              completed=time.strftime('%Y-%m-%d %H:%M:%S'))
+    finally:
+        with LOCK:
+            # Only drop our own event: a resume started right after this run
+            # stopped has already registered a new one under the same job_id.
+            if STOP_EVENTS.get(job_id) is stop_event:
+                STOP_EVENTS.pop(job_id, None)

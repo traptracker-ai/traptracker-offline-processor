@@ -23,7 +23,9 @@
 <fieldset class="choice"><legend>Copy matching videos</legend>
 <label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code>, keeping its sub-folder path, as soon as it is processed. A video with two chosen species is copied into both species folders. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
 <div id="copy_options" hidden>
-<label>Species to copy<input type="text" name="copy_species" placeholder="e.g. Red fox, Badger"><small>Comma-separated, matched case-insensitively against the species names in the results CSV. Leave blank to copy every video with any detection (including people and vehicles).</small></label>
+<div class="field"><span class="field-label">Species to copy</span>
+<details class="multi" id="species_picker"><summary>Any detection</summary><div class="multi-list" id="species_list"><p class="muted">Loading the model's species…</p></div></details>
+<small class="muted">Taken from the selected model's class list. Choose none to copy every video with any detection (including people and vehicles).</small></div>
 <label>Output folder name<input type="text" name="copy_folder" value="matched-videos"><small>Created inside the <code>output</code> folder.</small></label>
 <label>Minimum confidence to copy<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count. Set it higher than the detection threshold to cut false positives.</small></label>
 <label>Minimum frames with the species<input type="number" name="copy_min_frames" min="1" value="1"><small>How many processed frames must contain the species before a video is copied. Raise it to skip videos with a single stray detection. Counts only the frames that frame stride lets through.</small></label>

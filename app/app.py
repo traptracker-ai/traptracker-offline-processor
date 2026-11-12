@@ -1,11 +1,11 @@
-import os, shutil, json, csv, secrets
+import os, shutil, json, csv, secrets, threading
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, flash, abort
 from werkzeug.utils import secure_filename
-from detector import available_providers, IMAGE_EXTS, VIDEO_EXTS
+from detector import available_providers, species_labels, IMAGE_EXTS, VIDEO_EXTS
 from utils import (scan_inputs, scan_inputs_cached, invalidate_scan_cache, start_scan_refresher,
                    list_models, list_two_stage_pipelines, human_bytes, safe_copy_upload)
-from job_runner import start_job, get_job, list_jobs
+from job_runner import start_job, get_job, list_jobs, request_stop
 
 BASE = Path(__file__).resolve().parent.parent
 MODEL_DIR = Path(os.environ.get('MODEL_DIR', BASE / 'models'))
@@ -121,46 +121,78 @@ def clear_input():
     return redirect(url_for('input_manager'))
 
 
+def _model_config(form):
+    """Build the model part of a run config from the Processing form fields.
+
+    Returns (config, error). Model choices are only accepted if they appear in
+    the server-side listings, which also keeps user input from escaping MODEL_DIR.
+    """
+    pipeline = form.get('pipeline', 'single_stage')
+    if pipeline == 'two_stage':
+        pipelines = {p['name']: p for p in list_two_stage_pipelines(MODEL_DIR)}
+        chosen_pipeline = pipelines.get(form.get('two_stage_model', ''))
+        if not chosen_pipeline:
+            return None, 'Please select a valid two-stage detector'
+        return {
+            'pipeline': 'two_stage',
+            'pipeline_name': chosen_pipeline['name'],
+            'model_path': str(MODEL_DIR / chosen_pipeline['detector']),
+            'classifier_path': str(MODEL_DIR / chosen_pipeline['classifier']),
+            'classifier_classes_path': str(MODEL_DIR / chosen_pipeline['classes']) if chosen_pipeline['classes'] else '',
+        }, None
+    model = form.get('model')
+    if not model or model not in list_models(MODEL_DIR):
+        return None, 'Please select a valid ONNX model'
+
+    # Class names come only from the model's own <model>.txt / .names, else
+    # the names embedded in the model. A freely chosen or shared class file
+    # could belong to another model and silently mislabel every box.
+    classes_path = ''
+    for ext in ('.txt', '.names'):
+        same_stem = (MODEL_DIR / model).with_suffix(ext)
+        if same_stem.exists():
+            classes_path = same_stem
+            break
+    return {
+        'pipeline': 'single_stage',
+        'pipeline_name': Path(model).stem,
+        'model_path': str(MODEL_DIR / model),
+        'classes_path': str(classes_path),
+    }, None
+
+
+# (model/class file paths + mtimes) -> species list. Loading a model to read
+# its classes takes a moment, so each model is read once per change on disk.
+_SPECIES_CACHE = {}
+_SPECIES_LOCK = threading.Lock()
+
+
+@app.route('/api/model-species')
+def api_model_species():
+    model_config, error = _model_config(request.args)
+    if error:
+        return jsonify({'error': error}), 400
+    paths = [v for k, v in sorted(model_config.items()) if k.endswith('_path') and v]
+    key = tuple((p, Path(p).stat().st_mtime if Path(p).exists() else 0) for p in paths)
+    with _SPECIES_LOCK:
+        cached = _SPECIES_CACHE.get(key)
+    if cached is None:
+        try:
+            cached = {'species': species_labels(model_config)}
+        except Exception as e:  # noqa: BLE001 - shown to the user in the picker
+            return jsonify({'error': f'Could not read the class list: {e}'}), 500
+        with _SPECIES_LOCK:
+            _SPECIES_CACHE[key] = cached
+    return jsonify(cached)
+
+
 @app.route('/processing', methods=['GET', 'POST'])
 def processing():
     if request.method == 'POST':
-        pipeline = request.form.get('pipeline', 'single_stage')
-        # Model choices are only accepted if they appear in the server-side
-        # listings, which also keeps user input from escaping MODEL_DIR.
-        if pipeline == 'two_stage':
-            pipelines = {p['name']: p for p in list_two_stage_pipelines(MODEL_DIR)}
-            chosen_pipeline = pipelines.get(request.form.get('two_stage_model', ''))
-            if not chosen_pipeline:
-                flash('Please select a valid two-stage detector')
-                return redirect(url_for('processing'))
-            model_config = {
-                'pipeline': 'two_stage',
-                'pipeline_name': chosen_pipeline['name'],
-                'model_path': str(MODEL_DIR / chosen_pipeline['detector']),
-                'classifier_path': str(MODEL_DIR / chosen_pipeline['classifier']),
-                'classifier_classes_path': str(MODEL_DIR / chosen_pipeline['classes']) if chosen_pipeline['classes'] else '',
-            }
-        else:
-            model = request.form.get('model')
-            if not model or model not in list_models(MODEL_DIR):
-                flash('Please select a valid ONNX model')
-                return redirect(url_for('processing'))
-
-            # Class names come only from the model's own <model>.txt / .names, else
-            # the names embedded in the model. A freely chosen or shared class file
-            # could belong to another model and silently mislabel every box.
-            classes_path = ''
-            for ext in ('.txt', '.names'):
-                same_stem = (MODEL_DIR / model).with_suffix(ext)
-                if same_stem.exists():
-                    classes_path = same_stem
-                    break
-            model_config = {
-                'pipeline': 'single_stage',
-                'pipeline_name': Path(model).stem,
-                'model_path': str(MODEL_DIR / model),
-                'classes_path': str(classes_path),
-            }
+        model_config, model_error = _model_config(request.form)
+        if model_error:
+            flash(model_error)
+            return redirect(url_for('processing'))
 
         # Cached, not a fresh scan_inputs() call: on a large input folder, a
         # full walk can itself take well over a minute on some filesystems
@@ -194,7 +226,7 @@ def processing():
         copy_config = {'copy_matches': False}
         if copy_matches:
             folder = secure_filename(request.form.get('copy_folder', '').strip()) or 'matched-videos'
-            species = [s.strip() for s in request.form.get('copy_species', '').replace(';', ',').split(',') if s.strip()]
+            species = list(dict.fromkeys(s.strip() for s in request.form.getlist('copy_species') if s.strip()))
             copy_config = {
                 'copy_matches': True,
                 'copy_folder': folder,
@@ -280,7 +312,7 @@ def resume_run(job_id):
     job = _load_status(job_id)
     if not job:
         abort(404)
-    if job.get('status') not in ('error', 'finalizing', 'running'):
+    if job.get('status') not in ('error', 'stopped', 'finalizing', 'running'):
         flash('This run is not in a resumable state.')
         return redirect(url_for('run_detail', job_id=job_id))
     cfg = job.get('config')
@@ -300,6 +332,17 @@ def resume_run(job_id):
     cfg['runs_dir'] = str(RUNS_DIR)
     start_job(cfg, resume_job_id=secure_filename(job_id))
     flash('Resuming run — already-processed files will be skipped.')
+    return redirect(url_for('run_detail', job_id=job_id))
+
+
+@app.route('/runs/<job_id>/stop', methods=['POST'])
+def stop_run(job_id):
+    _safe_run_path(job_id)
+    job_id = secure_filename(job_id)
+    if request_stop(job_id):
+        flash('Stopping — the run will finish the file it is on, then stop. You can resume it later.')
+    else:
+        flash('This run is not running in this server process, so there is nothing to stop.')
     return redirect(url_for('run_detail', job_id=job_id))
 
 
