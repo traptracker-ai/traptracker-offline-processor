@@ -31,7 +31,7 @@
 
 <div class="form-section">
 <h3>Outputs</h3>
-<label class="check"><input type="checkbox" name="save_annotated" checked> <span>Save annotated images<small>Images and video frames with boxes drawn, shown in the Annotated Gallery.</small></span></label>
+<label class="check"><input type="checkbox" name="save_annotated" checked> <span>Save annotated images and video frames<small>Copies with boxes drawn, saved in the run folder for the Annotated Gallery (up to 2,000 frames per video). Untick to save disk space; the CSV and video copies are not affected.</small></span></label>
 <label class="check"><input type="checkbox" name="copy_matches" id="copy_matches"> <span>Copy videos that contain chosen species<small>Each matching video is copied, unchanged, to <code>output/&lt;folder&gt;/&lt;species&gt;/</code> as soon as it is processed, keeping its sub-folder path. Every copy is listed in <code>matched_files.csv</code>.</small></span></label>
 <div id="copy_options" class="sub-options" hidden>
 <div class="field"><span class="field-label">Species to copy</span>
@@ -42,7 +42,7 @@
 <label>Min. confidence<input type="number" name="copy_min_conf" min="0" max="1" step="0.01" value="0.5"><small>A detection must reach this to count.</small></label>
 <label>Min. frames<input type="number" name="copy_min_frames" min="1" value="1"><small>Frames (after stride) with the species.</small></label>
 </div>
-<label class="check"><input type="checkbox" name="copy_images"> <span>Also copy matching images</span></label>
+<label class="check"><input type="checkbox" name="copy_images"> <span>Also copy matching photos<small>Copies still images from the input folder that contain a chosen species. Video frames are never copied here.</small></span></label>
 </div>
 </div>
 

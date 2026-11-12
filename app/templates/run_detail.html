@@ -18,7 +18,7 @@
     <div><dt>Species copied</dt><dd>{{ job.config.copy_species|join(', ') if job.config.copy_species else 'Any detection' }}</dd></div>
     <div><dt>Min. confidence</dt><dd>{{ job.config.copy_min_conf }}</dd></div>
     <div><dt>Min. frames</dt><dd>{{ job.config.copy_min_frames }}</dd></div>
-    <div><dt>Images too</dt><dd>{{ 'Yes' if job.config.copy_images else 'No' }}</dd></div>
+    <div><dt>Photos too</dt><dd>{{ 'Yes' if job.config.copy_images else 'No' }}</dd></div>
   </dl>{% endif %}
   <div class="actions">
     {% if job.status in ('queued', 'loading', 'running', 'stopping') %}<form method="post" action="/runs/{{ job_id }}/stop" id="stop-form"><button class="btn danger" type="submit" id="stop-btn"{% if job.status == 'stopping' %} disabled{% endif %}>{{ 'Stopping…' if job.status == 'stopping' else 'Stop run' }}</button></form>{% endif %}
